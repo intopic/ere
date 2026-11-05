@@ -32,3 +32,21 @@ Komanda:
 CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" cargo run --release -p ss_rap_p3 --example bench_p3_mulmod -- 12 1 100 3
 CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" cargo run --release --example bench_stark_mulmod -- 12
 ```
+
+## P3: AIR-i i gjendjes (transferet) në 5 korsi
+
+- `p3/src/state.rs`: të njëjtat kolona dhe kufizime si `src/state.rs`. Bus-et bëhen bus-e me emër në Plonky3:
+  "mem" (kontrolli i memories), "tx" (transaksionet), "byte" (range-check).
+- Ana publike (tabela fillestare, tabela finale, transaksionet e korsisë) është `PublicAir`: tuple-t e saj janë
+  **kolona periodike** të ndërtuara nga deklarata. Plonky3 i lidh në transcript dhe verifikuesi i vlerëson vetë,
+  pra prover-i nuk mund t'i ndryshojë. Kontrolli i Plonky3 "të gjitha bus-et mblidhen në zero" jep atëherë
+  init + writes = reads + final dhe "çdo transaksion publik ekzekutohet një herë, në indeksin e vet".
+- Teste: prova e ndershme kalon; tabelë finale tjetër, tabelë fillestare tjetër, shumë tjetër, renditje tjetër,
+  transaksion i hequr, dhe batch me tejkalim balance refuzohen.
+
+| Transferet (100 llogari) | Plonky3 (Keccak), blowup 2 × 100 | Ne, Blake3, blowup 4 × 50 | Ne, Poseidon-BN254 |
+|---|---|---|---|
+| 1 000 | 56 ms | 86 ms | 812 ms |
+| 20 000 | 250 ms | 1.16 s | 12.3 s |
+
+`CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" cargo run --release -p ss_rap_p3 --example bench_p3_state -- 20000 1 100`

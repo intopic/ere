@@ -129,13 +129,16 @@ pub struct ByteTableAir;
 
 impl ByteTableAir {
     pub fn trace<F: Field>(rows: &[MulModRow], n_rows: usize, pad: &MulModRow) -> RowMajorMatrix<F> {
-        let mut m = vec![0u64; 256];
+        let mut m = [0u64; 256];
         for i in 0..n_rows {
             for b in rows.get(i).unwrap_or(pad).limbs() {
                 m[b as usize] += 1;
             }
         }
-        RowMajorMatrix::new(m.into_iter().map(F::from_u64).collect(), 1)
+        Self::from_counts(&m)
+    }
+    pub fn from_counts<F: Field>(m: &[u64; 256]) -> RowMajorMatrix<F> {
+        RowMajorMatrix::new(m.iter().map(|&x| F::from_u64(x)).collect(), 1)
     }
 }
 
