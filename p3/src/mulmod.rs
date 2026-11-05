@@ -25,12 +25,15 @@ pub const WIDTH: usize = NUM_COLUMNS + GROUPS;
 pub struct MulModAir {
     pub p: [u8; 32],
     pub log_rows: usize,
+    /// true: bytes are checked against groups of local multiplicity columns (slower, see
+    /// docs/PLONKY3.md); false: they go on the global "byte" bus to `ByteTableAir`.
+    pub local_table: bool,
 }
 
 impl MulModAir {
     pub fn new(p: &Modulus256, log_rows: usize) -> Self {
         assert!(log_rows >= 8, "the byte table needs 256 rows");
-        Self { p: p.bytes, log_rows }
+        Self { p: p.bytes, log_rows, local_table: false }
     }
 
     pub fn trace<F: Field>(&self, rows: &[MulModRow]) -> RowMajorMatrix<F> {
@@ -105,11 +108,11 @@ where
         }
         // LogUp: every byte column is in [0, 256); the table side is the preprocessed byte
         // column (first 256 rows hold 0..255, the rest repeat it) with its multiplicity.
-        if std::env::var("GLOBAL").is_ok() {
+        if !self.local_table {
             for j in 0..NUM_COLUMNS {
                 builder.push_interaction("byte", [c[j].clone()], 1);
             }
-        } else if std::env::var("NO_LOOKUP").is_err() {
+        } else {
             for g in 0..GROUPS {
                 let mut tuples: Vec<(Vec<AB::Expr>, Count<AB::Expr>)> =
                     (g * GROUP..((g + 1) * GROUP).min(NUM_COLUMNS)).map(|j| (vec![c[j].clone()], Count::bounded(AB::Expr::ONE, 1))).collect();

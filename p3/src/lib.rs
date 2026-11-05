@@ -2,4 +2,5 @@
 //! The AIRs and the PDF method stay the same; only the STARK engine underneath changes.
 
 pub mod config;
+pub mod fields;
 pub mod mulmod;
