@@ -40,7 +40,7 @@
 //! O(accounts). Production replaces them with the touched accounts plus sparse-Merkle paths
 //! against the state roots, without changing the AIR.
 
-use crate::stark::{self, Air, BusTerm, Challenges, Point, StarkParams, StarkProof};
+use crate::stark::{self, Air, BusTerm, BusTuple, Challenges, Point, StarkParams, StarkProof};
 use crate::transcript::Transcript;
 use crate::{add_mod, mul_mod_channel, sub_mod, Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
 
@@ -241,18 +241,23 @@ impl Air for StateAir<'_> {
         5
     }
     fn bus(&self, c: &[u32], ch_c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
+        let mut tuples = Vec::with_capacity(5);
+        self.bus_tuples(c, ch, &mut tuples);
+        stark::bus_from_tuples(&tuples, ch_c, ch, out);
+    }
+    fn bus_tuples(&self, c: &[u32], ch: usize, out: &mut Vec<BusTuple>) {
         let m = RNS_MODULI[ch];
         let two_t = add_mod(c[T], c[T], m);
         let act = c[ACTIVE];
         let neg = sub_mod(0, act, m);
-        let fp = |v: &[u32]| ch_c.fingerprint(TAG_MEM, v, ch);
-        out.push(BusTerm { den: fp(&mem_values(c[FROM_ID], c[NONCE], c[TR1], &c[FROM_OLD..FROM_OLD + 8])), weight: act });
-        out.push(BusTerm { den: fp(&mem_values(c[FROM_ID], add_mod(c[NONCE], 1, m), two_t, &c[FROM_NEW..FROM_NEW + 8])), weight: neg });
-        out.push(BusTerm { den: fp(&mem_values(c[TO_ID], c[TO_NONCE], c[TR2], &c[TO_OLD..TO_OLD + 8])), weight: act });
-        out.push(BusTerm { den: fp(&mem_values(c[TO_ID], c[TO_NONCE], add_mod(two_t, 1, m), &c[TO_NEW..TO_NEW + 8])), weight: neg });
+        let mem = |values: [u32; 11], weight: u32| BusTuple { tag: TAG_MEM, values: values.to_vec(), weight };
+        out.push(mem(mem_values(c[FROM_ID], c[NONCE], c[TR1], &c[FROM_OLD..FROM_OLD + 8]), act));
+        out.push(mem(mem_values(c[FROM_ID], add_mod(c[NONCE], 1, m), two_t, &c[FROM_NEW..FROM_NEW + 8]), neg));
+        out.push(mem(mem_values(c[TO_ID], c[TO_NONCE], c[TR2], &c[TO_OLD..TO_OLD + 8]), act));
+        out.push(mem(mem_values(c[TO_ID], c[TO_NONCE], add_mod(two_t, 1, m), &c[TO_NEW..TO_NEW + 8]), neg));
         let mut tx = vec![c[T], c[FROM_ID], c[TO_ID], c[NONCE]];
         tx.extend_from_slice(&c[AMT..AMT + 8]);
-        out.push(BusTerm { den: ch_c.fingerprint(TAG_TX, &tx, ch), weight: neg });
+        out.push(BusTuple { tag: TAG_TX, values: tx, weight: neg });
     }
     /// init - final - public txs, in lane `ch`'s field.
     fn bus_sum(&self, ch_c: &Challenges, ch: usize) -> Extension4 {

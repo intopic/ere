@@ -93,6 +93,20 @@ pub struct BusTerm {
     pub weight: u32,
 }
 
+/// A bus tuple of a row before fingerprinting: the recursion AIR (`composition_air.rs`) needs
+/// the values themselves. Values and weight must be linear in the row's columns.
+#[derive(Clone, Debug)]
+pub struct BusTuple {
+    pub tag: u32,
+    pub values: Vec<u32>,
+    pub weight: u32,
+}
+
+/// `Air::bus` from tuples.
+pub fn bus_from_tuples(tuples: &[BusTuple], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
+    out.extend(tuples.iter().map(|b| BusTerm { den: c.fingerprint(b.tag, &b.values, ch), weight: b.weight }));
+}
+
 /// An algebraic intermediate representation, evaluated independently in every lane (= channel).
 /// The first `byte_cols()` main columns are range-checked to [0, 256) by the engine.
 pub trait Air: Sync {
@@ -107,6 +121,11 @@ pub trait Air: Sync {
         0
     }
     fn bus(&self, _cur: &[u32], _c: &Challenges, _ch: usize, _out: &mut Vec<BusTerm>) {}
+    /// The row's bus terms as tuples (same order as `bus`). Needed only by AIRs that are
+    /// verified recursively.
+    fn bus_tuples(&self, _cur: &[u32], _ch: usize, _out: &mut Vec<BusTuple>) {
+        assert_eq!(self.num_bus(), 0, "this AIR does not expose its bus tuples");
+    }
     /// sum over all rows of the lane's bus terms, computed from public data.
     fn bus_sum(&self, _c: &Challenges, _ch: usize) -> Extension4 {
         Extension4::ZERO
@@ -197,7 +216,7 @@ impl Layout {
     }
 }
 
-fn shift(ch: usize) -> u32 {
+pub fn shift(ch: usize) -> u32 {
     EXTENSION_BETA[ch] // a quadratic non-residue: the coset never meets the trace domain
 }
 
@@ -234,7 +253,7 @@ fn coset_lde_ext(values: &[Extension4], blowup: usize, ch: usize) -> Vec<Extensi
 }
 
 /// Coefficients of t, the degree < 256 polynomial with t(w_256^i) = i.
-fn table_coeffs(ch: usize) -> Vec<u32> {
+pub fn table_coeffs(ch: usize) -> Vec<u32> {
     let mut coeffs: Vec<u32> = (0..TABLE as u32).collect();
     intt(&mut coeffs, ch);
     coeffs
@@ -508,13 +527,30 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
 
 /// Verifies a proof for `air`. `max_rows` bounds the public row count.
 pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: &StarkParams, t: &mut Transcript) -> bool {
+    verify_air_view(air, proof, max_rows, params, t).is_some()
+}
+
+/// What the verifier derived from the transcript (per lane): the claim of the recursion AIRs.
+#[derive(Clone, Debug)]
+pub struct StarkView {
+    pub chals: [Challenges; DEFAULT_RNS_CHANNELS],
+    pub gammas: [Extension4; DEFAULT_RNS_CHANNELS],
+    pub deltas: [Extension4; DEFAULT_RNS_CHANNELS],
+    /// S / N of every lane (public bus sum over the row count).
+    pub s_over_n: [Extension4; DEFAULT_RNS_CHANNELS],
+    pub indices: Vec<usize>,
+    pub fri_alphas: Vec<[Extension4; DEFAULT_RNS_CHANNELS]>,
+}
+
+/// `verify_air` that returns the derived challenges on success.
+pub fn verify_air_view<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: &StarkParams, t: &mut Transcript) -> Option<StarkView> {
     params.check();
     let l = Layout::of(air);
     let n_rows = 1usize << params.log_rows;
     let blowup = 1usize << params.log_blowup;
     let n = n_rows * blowup;
     if proof.openings.len() != params.num_queries || proof.rows > max_rows {
-        return false;
+        return None;
     }
     start_transcript(t, air, params, proof.rows);
     t.absorb_digest(b"stark/main", &proof.main_root);
@@ -527,9 +563,8 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
     let tcs: [Vec<u32>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(table_coeffs);
     let lanes = t.mode().lanes();
     let ctxs: [Option<LaneCtx>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| lanes.contains(&ch).then(|| lane_ctx(air, chals[ch], gammas[ch], n_rows, ch)));
-    let Some(indices) = fri::verify_coset(&proof.fri, &shifts, &params.fri(), t) else {
-        return false;
-    };
+    let fri_view = fri::verify_view(&proof.fri, &shifts, &params.fri(), t)?;
+    let indices = &fri_view.indices;
     let (mut base, mut bus) = (Vec::new(), Vec::new());
     let mode = t.mode();
 
@@ -548,7 +583,7 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
                 || !fri::verify_path(mode, &proof.aux_root, aux_leaf_from(mode, o), pos, &o.aux_path)
                 || !fri::verify_path(mode, &proof.q_root, q_leaf(mode, &o.quotient), pos, &o.q_path)
             {
-                return false;
+                return None;
             }
         }
         for slot in 0..2 {
@@ -561,16 +596,23 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
                 let c = composition(air, &l, &here.main[ch], &next.main[ch], &here.aux[ch], &next.aux[ch][l.sum()], tv, &pt, ctxs[ch].as_ref().unwrap(), ch, &mut base, &mut bus);
                 let z = sub_mod(pow(x, n_rows as u64, ch), 1, m);
                 if c != here.quotient[ch].mul_scalar(z, ch) {
-                    return false;
+                    return None;
                 }
                 let f = fri_combination(&here.main[ch], &here.aux[ch], &here.quotient[ch], &deltas[ch], ch);
                 if f != proof.fri.queries[q][0].pair[ch][slot] {
-                    return false;
+                    return None;
                 }
             }
         }
     }
-    true
+    Some(StarkView {
+        chals,
+        gammas,
+        deltas,
+        s_over_n: std::array::from_fn(|ch| ctxs[ch].as_ref().map_or(Extension4::ZERO, |c| c.s_over_n)),
+        indices: fri_view.indices.clone(),
+        fri_alphas: fri_view.alphas.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------

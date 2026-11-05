@@ -15,6 +15,7 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<
     (0..n).into_par_iter().map(f).collect()
 }
 
+pub mod composition_air;
 pub mod fri;
 pub mod fri_air;
 pub mod hash;
