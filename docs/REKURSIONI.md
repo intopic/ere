@@ -63,11 +63,20 @@ aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
 | R8.1 | Gadget-et BN254 (`settlement/src/wrapper/hash_var.rs`): transcript Poseidon, hash i gjetheve (vlera 31-bit, 8 për element), shtigje Merkle; identike me native, refuzojnë vlerë/pozicion/rrënjë të falsifikuar | ✅ |
 | R8.2 | FRI në qark (`fri_var.rs`) për 5 korsitë: palosje pa inversion 2x·next = x(f0+f1) + α(f0−f1), x_{l+1} = ±x_l², shtresa finale kanonike; refuzon çift, shtresë finale, shteg të falsifikuar | ✅ |
 | R8.3 | Verifikuesi i plotë STARK në qark (`stark_var.rs`) për AIR-in e gjendjes: transcript, 4 hapje × 3 pemë, kompozimi C = Q·(x^N−1) dhe kombinimi FRI në x, −x për çdo korsi, shuma publike S/N nga tuple-t publike. Prova e ndershme kalon; vlerë e hapur, kuocient, deklaratë tjetër refuzohen. Matja (1000 tx, blowup 64): ~1.56 M fikse + ~0.49 M për query → ~9.4 M me 16 query | ✅ |
+| R8.4 | Qarku i shlyerjes (`settle_circuit.rs`): deklarata (adresa të renditura, rrënjët e vjetra/reja si zinxhir Poseidon, digest), verifikuesi STARK, v_umt_root = Poseidon(digest, rrënjët e provës), dhe keccak256 i header-it në qark (308 K kufizime) i barabartë me inputin e vetëm publik. Kontrata nuk ndryshon. Pipeline-i kalon në transcript Poseidon me label konstant (`SS-RAP/v2/settle`) dhe `Wrapper::Stark` | ✅ |
+| R8.4c | Groth16 real me STARK-un brenda: formë e vogël (6 llogari, 12 tx, 2 query) → 1.38 M kufizime, setup ~35–40 s, prove ~18–22 s, verify 2.5 ms në 4 bërthama. `export_stark_fixture` gjeneron `contracts/StarkWrapperVerifier.sol` + fixture; testi Foundry `test/StarkSettlement.t.sol` shlyen batch-in me këtë verifikues dhe refuzon rrënjë/v_umt/provë tjetër | ✅ |
 
 ## Ndershmëria
 
-Deri sa të mbarojë R8, kontrata pranon provën Groth16 të qarkut DEV. STARK-u verifikohet nga aggregator-i.
-Ky kufizim është shkruar edhe te `settlement/src/groth16.rs`.
+Qarku i shlyerjes (R8.4) e verifikon STARK-un brenda SNARK-ut, por vetëm për **një formë fikse**
+(numri i llogarive, transaksionet për korsi, parametrat STARK): çelësi Groth16 lidhet me formën.
+Batch-et e madhësive të ndryshme kërkojnë mbushje (padding) deri në një formë standarde, kjo është R8.5.
+Deri atëherë fixture-i 1000 tx përdor ende qarkun DEV (`Groth16Verifier.sol`), dhe STARK-u i tij verifikohet
+nga aggregator-i. Mangësi të tjera të hapura:
+- blobhash është fushë e lirë në header: lidhja e përmbajtjes së blob-it me transaksionet e provuara (KZG) mbetet.
+- Fixture-i CI përdor 2 query FRI (i pasigurt); prodhimi kërkon ~100 bit siguri (p.sh. blowup 16 × 25 query).
+- Setup-i me farë publike nuk është i sigurt; prodhimi kërkon ceremoni shumë-palëshe.
+- Madhësia e plotë (1000 tx, 100 llogari, ~10–11 M kufizime) kërkon ~4 GB+ çelës dhe ~4 min prove në CPU: makina GPU në fund.
 
 ## Matja me madhësi reale (`cargo run --release --example bench_recursion -- 50 2`)
 
