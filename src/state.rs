@@ -41,7 +41,10 @@
 //! against the state roots, without changing the AIR.
 
 use crate::stark::{self, Air, BusTerm, BusTuple, Challenges, Point, StarkParams, StarkProof};
+use crate::hash::{fr_to_hash, poseidon_hash, tag_fr};
 use crate::transcript::Transcript;
+use ark_bn254::Fr;
+use ark_ff::PrimeField;
 use crate::{add_mod, mul_mod_channel, sub_mod, Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
 
 pub type Address = [u8; 20];
@@ -72,21 +75,36 @@ pub const MAX_NONCE: u32 = 1 << 30;
 /// Timestamps 2t+1 must fit the 2-byte read-age columns.
 pub const MAX_LOG_ROWS: u32 = 15;
 
-/// Canonical state root: Blake3 over the non-empty accounts in address order.
+/// An address as a field element (160 bits, big-endian).
+pub fn addr_fr(a: &Address) -> Fr {
+    Fr::from_be_bytes_mod_order(a)
+}
+
+/// An account as one field element: balance * 2^32 + nonce.
+pub fn account_fr(s: &AccountState) -> Fr {
+    Fr::from(s.balance) * Fr::from(1u64 << 32) + Fr::from(s.nonce)
+}
+
+/// A transfer as one field element: from + to 2^32 + nonce 2^64 + amount 2^96.
+pub fn transfer_fr(tx: &Transfer) -> Fr {
+    let s32 = Fr::from(1u64 << 32);
+    Fr::from(tx.from) + Fr::from(tx.to) * s32 + Fr::from(tx.nonce) * s32 * s32 + Fr::from(tx.amount) * s32 * s32 * s32
+}
+
+/// Canonical state root (R8: Poseidon over BN254, so the settlement circuit can recompute it):
+/// a hash chain h <- Poseidon(h, address, balance 2^32 + nonce) over the non-empty accounts in
+/// address order, starting from a domain tag.
 pub fn state_root(addrs: &[Address], states: &[AccountState]) -> [u8; 32] {
     assert_eq!(addrs.len(), states.len());
     let mut idx: Vec<usize> = (0..addrs.len()).collect();
     idx.sort_by_key(|&i| addrs[i]);
-    let mut h = blake3::Hasher::new();
-    h.update(b"SS-RAP/v2/state");
+    let mut h = tag_fr(b"SS-RAP/v2/state");
     for i in idx {
         if !states[i].is_empty() {
-            h.update(&addrs[i]);
-            h.update(&states[i].balance.to_be_bytes());
-            h.update(&states[i].nonce.to_be_bytes());
+            h = poseidon_hash(&[h, addr_fr(&addrs[i]), account_fr(&states[i])]);
         }
     }
-    *h.finalize().as_bytes()
+    fr_to_hash(&h)
 }
 
 /// Everything public about a batch: the address table, the table after every lane (states[0] is
@@ -109,34 +127,28 @@ impl StateStatement {
     pub fn num_txs(&self) -> usize {
         self.lanes.iter().map(Vec::len).sum()
     }
-    pub fn digest(&self) -> [u8; 32] {
-        let mut h = blake3::Hasher::new();
-        h.update(b"SS-RAP/v2/state-statement");
-        h.update(&(self.addrs.len() as u64).to_le_bytes());
-        for a in &self.addrs {
-            h.update(a);
-        }
+    /// The statement as field elements (what `digest` hashes and the settlement circuit
+    /// witnesses): tag, account count, addresses, every table (balance 2^32 + nonce), the final
+    /// timestamps (8 per element), and per lane the transfer count and the transfers.
+    pub fn elements(&self) -> Vec<Fr> {
+        let mut v = vec![tag_fr(b"SS-RAP/v2/state-statement"), Fr::from(self.addrs.len() as u64)];
+        v.extend(self.addrs.iter().map(addr_fr));
         for table in &self.states {
-            for s in table {
-                h.update(&s.balance.to_le_bytes());
-                h.update(&s.nonce.to_le_bytes());
-            }
+            v.extend(table.iter().map(account_fr));
         }
         for ts in &self.final_ts {
-            for t in ts {
-                h.update(&t.to_le_bytes());
-            }
+            v.extend(crate::hash::pack(ts));
         }
         for lane in &self.lanes {
-            h.update(&(lane.len() as u64).to_le_bytes());
-            for tx in lane {
-                h.update(&tx.from.to_le_bytes());
-                h.update(&tx.to.to_le_bytes());
-                h.update(&tx.amount.to_le_bytes());
-                h.update(&tx.nonce.to_le_bytes());
-            }
+            v.push(Fr::from(lane.len() as u64));
+            v.extend(lane.iter().map(transfer_fr));
         }
-        *h.finalize().as_bytes()
+        v
+    }
+
+    /// Poseidon digest of `elements`.
+    pub fn digest(&self) -> [u8; 32] {
+        fr_to_hash(&poseidon_hash(&self.elements()))
     }
 
     /// Shape checks the verifier does on the public data before touching the proof.
@@ -197,7 +209,8 @@ pub struct StateAir<'a> {
 
 impl Air for StateAir<'_> {
     fn statement(&self) -> Vec<u8> {
-        [b"state-transfer-v1".as_slice(), &self.st.digest()].concat()
+        // 16-byte prefix, then the digest: the transcript absorbs it as (prefix, low, high)
+        [b"state-transfer-2".as_slice(), &self.st.digest()].concat()
     }
     fn width(&self) -> usize {
         WIDTH

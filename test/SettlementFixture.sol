@@ -5,16 +5,16 @@
 pragma solidity ^0.8.26;
 
 library SettlementFixture {
-    bytes32 internal constant OLD_ROOT = 0xae4baa525f293d13a273f98399501a45cbe7202865a4c510233141b46feda6f7;
-    bytes32 internal constant NEW_ROOT = 0xb2dbb09f1b4e0c962214f61f0a8c69e43a06e4e717f76134bea61220c94d0592;
-    bytes32 internal constant VUMT_ROOT = 0xffacb7594f22c18029706b9cd060609976ae0775ef74af81efb4e31febd291df;
+    bytes32 internal constant OLD_ROOT = 0x2f5bc57216eb783ccca93ca598de6363a02fc94b7fc90450f3819c90ed01df1a;
+    bytes32 internal constant NEW_ROOT = 0x00e07e428b59e814b90e496de93b79239df22c018f9754398137e7cd6123cd23;
+    bytes32 internal constant VUMT_ROOT = 0x16a182e847df8fa0b1485ec3a7b2659199c07e85643649ba401c98c61f0f8bdb;
     bytes32 internal constant BLOB_HASH = 0x0181fd1a6cf29ef65ee9f7e28051c38490b3feb5a4735c6ef0ac93c36fee741c;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
-    uint256 internal constant PUBLIC_INPUT = 0x0ea40ddf617cb03a0309129da7cf177195bd8c55423a66e03a28913011031a39;
+    uint256 internal constant PUBLIC_INPUT = 0x303cf1b2e4510f5759440398833fbe26dc6d3475761055cc72d92aa75b914e08;
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x1c1d587b60f3716b814cf640c8449405ae43838828b0f3602151d25b082c574a), uint256(0x0bae13e4ddf6b269ee6c671b41b92e74892553d8448e9a30e33de3f6df06881e)];
+        p = [uint256(0x11e222f466f60c19d15cee9b31f4dcc27b479b7cad0fefe33391b3e8249634c7), uint256(0x0901605e85c57cc2fa460ebf0007926669ff4a745617b527b986ed36febce34c)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
@@ -22,6 +22,6 @@ library SettlementFixture {
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x268b747ab84b1b8e98c35215299f42e528feb67b88bcd319875d60b43a9cba3e), uint256(0x081daded0c337c5f7170753da4481190b9c68e9d464995cbdffbfb4a0d132ce2)];
+        p = [uint256(0x2c9bd763418a242eeb408d8efb6c6d43aa1a8be84574fcef115c5b0aab1cd7ae), uint256(0x2677948677ce05a1f711ef41044670d6d81322c22dddca2b318cd70f2b1ec462)];
     }
 }
