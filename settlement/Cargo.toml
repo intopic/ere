@@ -1,0 +1,20 @@
+[package]
+name = "ss_rap_settlement"
+version = "0.1.0"
+edition = "2021"
+description = "SS-RAP v2 Phase C: L1 settlement (Groth16 over BN254), sequencer and payment module"
+
+[dependencies]
+ss_rap_v2 = { path = ".." }
+ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-groth16 = "0.5"
+ark-relations = "0.5"
+ark-snark = "0.5"
+ark-std = "0.5"
+ark-serialize = "0.5"
+tiny-keccak = { version = "2", features = ["keccak"] }
+num-bigint = "0.4"
+rand_chacha = "0.3"
+blake3 = "1.5"

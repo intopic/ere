@@ -16,8 +16,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --all-targets --locked
-      - name: Tests
-        run: cargo test --release --locked
+      - name: Tests (core + settlement)
+        run: cargo test --release --locked --workspace
+      - name: Phase C end-to-end (writes Solidity verifier + fixture; must be up to date)
+        run: |
+          cargo run --release --locked -p ss_rap_settlement --example export_fixture | tee e2e.txt
+          git diff --exit-code -- contracts/Groth16Verifier.sol test/SettlementFixture.sol
       - name: PDF strategy benchmark
         run: cargo run --release --locked --example bench_pdf_strategy -- 65536 | tee bench_pdf_strategy.txt
       - name: End-to-end STARK benchmark (1024 x uint256 MULMOD)
@@ -27,16 +31,22 @@ jobs:
       - name: Benchmark summary
         run: |
           {
+            echo '## Phase C end-to-end'; echo '```'; cat e2e.txt; echo '```'
             echo '## bench_pdf_strategy'; echo '```'; cat bench_pdf_strategy.txt; echo '```'
             echo '## bench_stark_mulmod'; echo '```'; cat bench_stark_mulmod.txt; echo '```'
             echo '## bench_rns256'; echo '```'; cat bench_rns256.txt; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
   solidity:
-    name: Solidity compile (Foundry)
+    name: Solidity build + tests (Foundry)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
-      - name: Build contract
+      - name: Build contracts
         run: forge build --sizes
+      - name: Settlement tests (proof from the Rust pipeline)
+        run: forge test -vv --gas-report | tee forge.txt
+      - name: Summary
+        run: |
+          { echo '## forge test'; echo '```'; cat forge.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
