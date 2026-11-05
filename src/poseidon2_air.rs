@@ -23,16 +23,22 @@ pub const COLS: usize = 1 + WIDTH + 2 * SBOXES;
 pub const NUM_CONSTRAINTS: usize = 1 + 2 * SBOXES;
 const TAG: u32 = 3;
 
-/// Runs the permutation on `input`, either filling the S-box columns (`fill`) or reading them
-/// from `cols` and pushing the constraint values; returns the output state.
-fn run(input: &[u32; WIDTH], cols: &mut [u32], fill: bool, out: Option<&mut Vec<u32>>) -> [u32; WIDTH] {
+/// Columns used by one permutation's S-boxes.
+pub const SBOX_COLS: usize = 2 * SBOXES;
+/// Constraints of one permutation.
+pub const PERM_CONSTRAINTS: usize = 2 * SBOXES;
+
+/// Runs the permutation on `input` with its S-box columns at `cols[base..base + SBOX_COLS]`,
+/// either filling them (`fill`) or reading them and pushing the constraint values; returns the
+/// output state.
+pub(crate) fn run_at(input: &[u32; WIDTH], cols: &mut [u32], base: usize, fill: bool, out: Option<&mut Vec<u32>>) -> [u32; WIDTH] {
     let ch = LANE;
     let m = RNS_MODULI[ch];
     let prm = params();
     let mut out = out;
     let mut k = 0usize;
     let mut sbox = |s: u32, cols: &mut [u32]| -> u32 {
-        let (iq, ic) = (1 + WIDTH + 2 * k, 2 + WIDTH + 2 * k);
+        let (iq, ic) = (base + 2 * k, base + 1 + 2 * k);
         k += 1;
         if fill {
             cols[iq] = mul_mod_channel(s, s, ch);
@@ -59,6 +65,10 @@ fn run(input: &[u32; WIDTH], cols: &mut [u32], fill: bool, out: Option<&mut Vec<
         external_linear(&mut st);
     }
     st
+}
+
+fn run(input: &[u32; WIDTH], cols: &mut [u32], fill: bool, out: Option<&mut Vec<u32>>) -> [u32; WIDTH] {
+    run_at(input, cols, 1 + WIDTH, fill, out)
 }
 
 /// Trace row for one permutation.

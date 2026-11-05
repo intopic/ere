@@ -18,6 +18,7 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<
 pub mod fri;
 pub mod hash;
 pub mod logup;
+pub mod merkle_air;
 pub mod ntt;
 pub mod poseidon2;
 pub mod poseidon2_air;

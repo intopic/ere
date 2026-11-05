@@ -38,8 +38,8 @@ aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
 | R0 | Gadget-e BN254 për 5 fushat + F⁴, modeli i kostos | ✅ `settlement/src/wrapper` |
 | R1 | Poseidon mbi BN254 për commitment dhe Fiat-Shamir (shtresa 3) | ✅ `src/hash.rs` |
 | R2 | Poseidon2 mbi KoalaBear: native (`src/poseidon2.rs`, 1.15 µs/permutim, M_I me polinom karakteristik të pareduktueshëm) + AIR (`src/poseidon2_air.rs`, një permutim për rresht, teste falsifikimi) | ✅ |
-| R3 | Hyrje publike në motorin STARK (kufij në rreshtin e parë/fundit) | ⏳ |
-| R4 | AIR i verifikimit të Merkle-s (shtigje, rrënjë publike) | ⏳ |
+| R3 | Hyrje publike në motorin STARK: deklarata absorbohet në transcript, vlerat publike hyjnë si shuma bus-i që i llogarit verifikuesi; kufiri i rreshtit të parë me `Point::first_row` | ✅ `src/stark.rs` |
+| R4 | AIR i verifikimit të Merkle-s me Poseidon2: një nivel për rresht, nivelet lidhen me bus (fëmijë → prind), pretendimet (gjethe, indeks, rrënjë) publike; teste sulmi | ✅ `src/merkle_air.rs` |
 | R5 | AIR i Fiat-Shamir (sponge Poseidon2) dhe nxjerrja e sfidave | ⏳ |
 | R6 | AIR i kontrolleve algjebrike për korsi (kompozimi + palosja FRI) | ⏳ |
 | R7 | STARK-u rekursiv: (1) → (2), test me prova të falsifikuara | ⏳ |
