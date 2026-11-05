@@ -42,13 +42,13 @@ ekzekuton në çdo push). Raportet janë ato që kanë rëndësi, numrat absolut
 | S3 | Barrett në vend të `%` | 3.00 ns | 1.98 ns | **1.5× më shpejt** |
 | S4 | Batch inversion (N = 65 536) | 89.6 ns/elem | 14.7 ns/elem | **6.1× më shpejt** |
 | S5 | V-UMT kundrejt 5 pemëve | 655 355 hash, 40.3 ms | 131 071 hash, 14.0 ms | **5× më pak hash, 2.9× më shpejt, 5× më pak rrënjë/shtigje** |
-| S2 | Kufizimet RNS pa bartje kundrejt zinxhirit me bartje (16-bit limbs) | thellësi 8, 85 ns/rresht | thellësi 1, 5 kanale të pavarura, 130 ns/kanal, 610 ns gjithsej | **Struktura: 8 → 1 thellësi, 0 kolona bartjesh. Në CPU: më i ngadaltë** |
+| S2 | Kufizimet RNS pa bartje kundrejt zinxhirit me bartje (16-bit limbs) | thellësi 8, 94 ns/rresht | thellësi 1, 5 kanale të pavarura: 21 ns/kanal, 83 ns gjithsej | **4.5× vonesë më e ulët me 5 kanale paralele, 0.88× e punës totale** |
 
 **Përfundim i ndershëm:**
 * Katër nga pesë zëvendësimet e PDF-së (S1, S3, S4, S5) janë **të matura dhe japin përfitim real** në CPU.
-* S2, thelbi "pa bartje", e heq zinxhirin sekuencial (thellësia nga 8 në 1), që është ajo që nevojitet për
-  paralelizëm në GPU. Por në CPU, me një thread, kontrolli RNS kushton më shumë se zinxhiri klasik, sepse `limb_tie`
-  rillogarit fuqitë 256^k në çdo thirrje. Përfitimi i S2 mbetet **hipotezë deri në benchmark GPU**.
+* S2, thelbi "pa bartje": pas parallogaritjes së konstanteve 256^k (`POW256`, faza A), kontrolli RNS është
+  **më i lirë** se zinxhiri klasik edhe në një thread (0.88× e punës), dhe me 5 kanale paralele jep **4.5× vonesë
+  më të ulët**. Në versionin e parë ishte më i ngadaltë, sepse `limb_tie` i rillogariste fuqitë në çdo thirrje.
 * Pretendimet "15×–100×", "2.5–4 s", "−55% thellësi gjurme" dhe "89% marzh" **nuk janë matur** ende. Ato kërkojnë
   një prover të plotë dhe GPU.
 * Matja e mëparshme "1.36× më shumë punë" krahasonte numrin e shumëzimeve me 17 kanale. Kjo nuk mat strategjinë e

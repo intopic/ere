@@ -9,7 +9,10 @@
 //!    with beta = [11, 3, 5, 11, 5] (proven Quadratic Non-Residues for all 5 primes).
 //! 5. O(N) Montgomery Batch Inversion for FRI Folding & LogUp Denominators (Zero Euclidean while-loops in hot loops).
 
+pub mod logup;
 pub mod rns256;
+pub mod transcript;
+pub mod uint256;
 
 use blake3::Hasher;
 use rayon::prelude::*;
@@ -58,6 +61,25 @@ pub const TWO_ADIC_OMEGA_24: [u32; DEFAULT_RNS_CHANNELS] = [
     270419129,
     996777632,
 ];
+
+/// 256^k mod m_j for k = 0..32 (byte-limb weights for 64-bit and 256-bit values), computed at
+/// compile time.
+pub const POW256: [[u32; 32]; DEFAULT_RNS_CHANNELS] = {
+    let mut out = [[0u32; 32]; DEFAULT_RNS_CHANNELS];
+    let mut ch = 0;
+    while ch < DEFAULT_RNS_CHANNELS {
+        let m = RNS_MODULI[ch] as u64;
+        let mut acc = 1u64;
+        let mut k = 0;
+        while k < 32 {
+            out[ch][k] = acc as u32;
+            acc = acc * 256 % m;
+            k += 1;
+        }
+        ch += 1;
+    }
+    out
+};
 
 /// Sunzi / CRT Parameters for exact 256-bit multiprecision integer reconstruction
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,15 +387,17 @@ impl CarryFreeMulWitnessRow {
     }
 
 /// Limb-tie: residue - sum_k limbs[k] * 256^k  (mod m_ch). Zero iff the residue matches the limbs.
+    /// The coefficients 256^k mod m_ch are compile-time constants (`POW256`): the tie is a linear
+    /// constraint with fixed coefficients, exactly as in the PDF (f.8).
     fn limb_tie(res: u32, limbs: &[u8; 8], ch: usize) -> u32 {
-        let m = RNS_MODULI[ch];
-        let mut recon = 0u32;
-        let mut base = 1u32;
-        for &l in limbs {
-            recon = add_mod(recon, mul_mod_channel(l as u32, base, ch), m);
-            base = mul_mod_channel(base, 256, ch);
+        let pw = &POW256[ch];
+        // 8 products < 2^39 each: accumulate in u64 and reduce once with Barrett.
+        let mut recon = 0u64;
+        for k in 0..8 {
+            recon += (limbs[k] as u64) * (pw[k] as u64);
         }
-        sub_mod(res, recon, m)
+        let recon = fast_reduce_channel(recon, ch);
+        sub_mod(res, recon, RNS_MODULI[ch])
     }
 
     /// Evaluates the carry-free AIR constraints in channel `ch`.
