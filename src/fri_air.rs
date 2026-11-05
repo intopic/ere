@@ -223,9 +223,19 @@ impl Air for FriFoldAir {
         for x in [self.lane as u32, self.shift, self.log_n, self.alphas.len() as u32, self.indices.len() as u32] {
             v.extend_from_slice(&x.to_le_bytes());
         }
-        v.extend(self.alphas.iter().flat_map(|a| a.to_bytes()));
-        v.extend(self.indices.iter().flat_map(|&i| (i as u64).to_le_bytes()));
-        v.extend(self.final_value.to_bytes());
+        v.extend([self.link_layer0 as u8, self.link_leaves as u8, self.index_links as u8]);
+        v.extend_from_slice(&self.leaf_base.to_le_bytes());
+        // only what the bus sum uses is public: the claim, or the transcript schedule
+        match &self.chal_links {
+            Some(ks) => v.extend(ks.iter().flat_map(|k| k.to_le_bytes())),
+            None => {
+                v.extend(self.alphas.iter().flat_map(|a| a.to_bytes()));
+                v.extend(self.final_value.to_bytes());
+            }
+        }
+        if !self.index_links {
+            v.extend(self.indices.iter().flat_map(|&i| (i as u64).to_le_bytes()));
+        }
         v
     }
     fn width(&self) -> usize {

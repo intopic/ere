@@ -28,6 +28,7 @@ pub mod merkle_air;
 pub mod ntt;
 pub mod poseidon2;
 pub mod poseidon2_air;
+pub mod public_sum_air;
 pub mod recursion;
 pub mod rns256;
 pub mod sponge_air;

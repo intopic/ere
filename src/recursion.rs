@@ -14,19 +14,22 @@
 //!     and fold tables read alpha, beta, rho, gamma, delta and the FRI alphas from its outputs.
 //!   - R7.2e: the query indices come from transcript output words (`index_air`): the fold rows'
 //!     selection bits and x_0, and every leaf's position in its tree.
-//!     Public: the inner statement, the transcript's public words and schedule, S/N (R7.2f).
+//!   - R7.2f: S / N is computed from the inner statement's public tuples under the transcript's
+//!     beta and rho (`public_sum_air`).
+//!     Public: the inner statement and the transcript's public words and schedule.
 
 use crate::composition_air::{self, CompositionAir};
 use crate::fri_air::FriFoldAir;
 use crate::hash::hash_to_words;
 use crate::leaf_air::{LeafHashAir, LeafSpec};
 use crate::index_air::IndexAir;
+use crate::public_sum_air::PublicSumAir;
 use crate::link_air::{FinalAir, PidRootAir, TreeRootAir, TreeSpec};
 use crate::transcript::Transcript;
 use crate::transcript_air::TranscriptAir;
 use crate::merkle_air::{Digest, MerkleAir, PathClaim};
 use crate::multi_air::Stacked;
-use crate::stark::{shift, verify_air_view, Air, StarkParams, StarkProof, StarkView};
+use crate::stark::{shift, verify_air_view, Air, Challenges, StarkParams, StarkProof, StarkView};
 use crate::hash::HashMode;
 use crate::{Extension4, DEFAULT_RNS_CHANNELS};
 
@@ -71,6 +74,7 @@ pub struct LaneAlgebra<'a, A: Air> {
     pub final_air: FinalAir,
     pub index: IndexAir,
     pub index_words: Vec<u32>,
+    pub public_sum: PublicSumAir,
     pub mult_word: Vec<[u32; 4]>,
     pub view: StarkView,
 }
@@ -138,7 +142,10 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
         };
         composition.chal_links = Some(std::array::from_fn(ext_k));
         fold.chal_links = Some((0..rounds).map(|l| ext_k(5 + l)).collect());
+        let public_sum = PublicSumAir::new(j, 1 << params.log_rows, inner.public_tuples(j), ext_k(1), ext_k(2), composition.claims.len() as u32);
         let mut mult_ext = vec![0u32; d.log.len()];
+        mult_ext[ext_k(1) as usize] += public_sum.tuples.len() as u32;
+        mult_ext[ext_k(2) as usize] += public_sum.tuples.len() as u32;
         for c in 0..5 {
             mult_ext[ext_k(c) as usize] += composition.claims.len() as u32;
         }
@@ -215,19 +222,68 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             final_air,
             index,
             index_words,
+            public_sum,
             mult_word,
             view: view.clone(),
         }
     }
 
+    /// Erases everything the outer verifier does not know: the inner challenges, opened values,
+    /// query positions, roots and FRI values. What is left is the outer statement (the inner
+    /// statement, the shapes and the transcript schedule): the outer proof verifies against it.
+    pub fn strip_private(&mut self) {
+        let z = Extension4::ZERO;
+        let c = &mut self.composition;
+        c.chals = Challenges { alpha: z, beta: z, rho: z };
+        (c.gamma, c.delta, c.s_over_n) = (z, z, z);
+        for cl in &mut c.claims {
+            (cl.pos, cl.f) = (0, z); // (q, slot) only name the row
+        }
+        let f = &mut self.fold;
+        f.alphas.iter_mut().for_each(|a| *a = z);
+        f.indices.iter_mut().for_each(|i| *i = 0);
+        f.final_value = z;
+        self.leaves.leaves.iter_mut().for_each(|s| s.index = 0);
+        for cl in &mut self.merkle.claims {
+            (cl.leaf, cl.index, cl.root) = ([0; 8], 0, [0; 8]);
+        }
+        self.opened.clear();
+        self.pairs.clear();
+        self.leaf_words.clear();
+        self.paths.clear();
+        self.duplex_log.clear();
+        self.mult_ext.clear();
+        self.mult_word.clear();
+        self.tree_root_values.clear();
+        self.index_words.clear();
+    }
+
+    /// The transcript schedule and shapes: everything public except the inner statement.
+    pub fn schedule(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        let words: Vec<(u32, u32)> = self.transcript.public_words.iter().map(|&(k, p, _)| (k, p)).collect();
+        let c = &self.composition;
+        v.extend([c.lane as u32, c.claims.len() as u32].iter().chain(c.chal_links.iter().flatten()).flat_map(|x| x.to_le_bytes()));
+        v.extend(c.claims.iter().flat_map(|cl| [cl.q as u32, cl.slot as u32]).flat_map(|x| x.to_le_bytes()));
+        for part in [self.fold.statement(), self.leaves.statement(), self.merkle.statement(), self.pid_roots.statement(), self.tree_roots.statement(), self.final_air.statement(), self.index.statement()] {
+            v.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            v.extend(part);
+        }
+        v.extend(words.iter().flat_map(|&(k, p)| [k, p]).flat_map(|x| x.to_le_bytes()));
+        v.extend_from_slice(&(self.transcript.perms as u32).to_le_bytes());
+        v.extend_from_slice(&self.public_sum.beta_k.to_le_bytes());
+        v.extend_from_slice(&self.public_sum.rho_k.to_le_bytes());
+        v
+    }
+
     pub fn stack(&self) -> Stacked<'_> {
-        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air, &self.index])
+        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air, &self.index, &self.public_sum])
     }
 
     /// Smallest stack height that fits every table.
     pub fn log_rows(&self) -> u32 {
         let merkle_rows: usize = self.merkle.claims.iter().map(|c| c.depth as usize).sum();
-        let need = [self.opened.len() + 1, self.pairs.len() * self.fold.alphas.len() + 1, self.leaves.rows_needed() + 1, merkle_rows + 1, self.transcript.perms + 1, self.merkle.claims.len() + 1, 256];
+        let need = [self.opened.len() + 1, self.pairs.len() * self.fold.alphas.len() + 1, self.leaves.rows_needed() + 1, merkle_rows + 1, self.transcript.perms + 1, self.merkle.claims.len() + 1, self.public_sum.tuples.len() + 1, 256];
         need.iter().max().unwrap().next_power_of_two().trailing_zeros()
     }
 
@@ -242,6 +298,7 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             self.tree_roots.traces(&self.tree_root_values, self.fold.lane, log_rows),
             self.final_air.traces(&self.fold.final_value, self.fold.lane, log_rows),
             self.index.traces(&self.index_words, log_rows),
+            self.public_sum.traces(&self.composition.chals.beta, &self.composition.chals.rho, log_rows),
         ];
         self.stack().traces(&parts, log_rows)
     }
@@ -475,6 +532,85 @@ mod tests {
         let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         alg.fold.indices[2] ^= 1 << 6;
         assert!(!outer_ok(&alg), "fold rows on another index");
+    }
+
+    fn outer_proof<A: Air>(alg: &LaneAlgebra<A>) -> (StarkProof, StarkParams) {
+        let p = StarkParams { log_rows: alg.log_rows(), log_blowup: 2, num_queries: 16 };
+        let traces = alg.traces(p.log_rows);
+        let j = alg.composition.lane;
+        let proof = prove_air(&alg.stack(), &traces, alg.composition.claims.len(), &p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8)));
+        (proof, p)
+    }
+
+    fn outer_verifies<A: Air>(alg: &LaneAlgebra<A>, proof: &StarkProof, p: &StarkParams) -> bool {
+        let j = alg.composition.lane;
+        verify_air(&alg.stack(), proof, 1 << p.log_rows, p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8)))
+    }
+
+    #[test]
+    fn inner_statement_is_the_public_tuples() {
+        let j = 1;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+        // The prover claims the proof is about another final state, transaction or weight:
+        // S / N changes and the composition rows of the inner proof no longer close.
+        let forge = |f: &dyn Fn(&mut PublicSumAir)| {
+            let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+            f(&mut alg.public_sum);
+            outer_ok(&alg)
+        };
+        let last = |s: &mut PublicSumAir| s.tuples.len() - 1;
+        assert!(!forge(&|s| { let i = last(s); s.tuples[i].values[0] ^= 1 }), "another last tuple");
+        assert!(!forge(&|s| s.tuples[0].values[1] ^= 2), "another first tuple");
+        assert!(!forge(&|s| s.tuples[3].weight = crate::add_mod(s.tuples[3].weight, 1, crate::RNS_MODULI[j])), "another weight");
+        assert!(!forge(&|s| { s.tuples.pop(); }), "a tuple dropped");
+        assert!(!forge(&|s| s.readers += 1), "S / N read by one more row");
+        assert!(!forge(&|s| s.beta_k = s.rho_k), "beta from another permutation");
+    }
+
+    #[test]
+    fn outer_proof_verifies_from_the_public_statement_alone() {
+        let j = 0;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+        let alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        let (outer, p) = outer_proof(&alg);
+        let mut public = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        public.strip_private();
+        assert!(outer_verifies(&public, &outer, &p), "the verifier needs only the public data");
+        // and that public statement is binding: another inner statement rejects the proof
+        let mut other = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        other.strip_private();
+        other.public_sum.tuples[2].values[0] ^= 1;
+        assert!(!outer_verifies(&other, &outer, &p), "outer proof accepted for another inner statement");
+    }
+
+    #[test]
+    fn transcript_schedule_depends_only_on_the_shapes() {
+        // Two inner proofs of different statements with the same shapes: the outer statements
+        // differ only in the inner statement, so the verifier can derive the schedule itself.
+        use crate::state::{build, AccountState, Transfer};
+        let j = 3;
+        let (st_a, proof_a, _) = lane(j);
+        let addrs: Vec<[u8; 20]> = (0..30u8).map(|i| [i ^ 0x55; 20]).collect();
+        let old: Vec<AccountState> = (0..30).map(|i| AccountState { balance: 900_000 + 3 * i as u64, nonce: 2 }).collect();
+        let mut nonces = vec![2u32; 30];
+        let txs: Vec<Transfer> = (0..90u32)
+            .map(|k| {
+                let from = (k * 7 + 1) % 30;
+                let tx = Transfer { from, to: (k * 13 + 5) % 30, amount: 70 + 2 * k as u64, nonce: nonces[from as usize] };
+                nonces[from as usize] += 1;
+                tx
+            })
+            .collect();
+        let (st_b, traces_b) = build(&addrs, &old, &txs, INNER.log_rows, true).unwrap();
+        let inner_b = crate::state::StateAir { st: &st_b };
+        let proof_b = prove_air(&inner_b, &traces_b, st_b.num_txs(), &INNER, &mut Transcript::with_mode(b"inner", HashMode::Lane(j as u8)));
+        let inner_a = crate::state::StateAir { st: &st_a };
+        let a = LaneAlgebra::new(&inner_a, &proof_a, INNER, b"inner");
+        let b = LaneAlgebra::new(&inner_b, &proof_b, INNER, b"inner");
+        assert_eq!(a.schedule(), b.schedule());
+        assert_ne!(a.public_sum.statement(), b.public_sum.statement());
     }
 
     #[test]

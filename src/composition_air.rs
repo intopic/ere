@@ -208,8 +208,8 @@ impl<'a, A: Air> CompositionAir<'a, A> {
         let chals = [self.chals.alpha, self.chals.beta, self.chals.rho, self.gamma, self.delta];
         if self.chal_links.is_none() {
             v.extend(chals.iter().flat_map(|e| e.c));
+            v.extend(self.s_over_n.c);
         }
-        v.extend(self.s_over_n.c);
         v
     }
 
@@ -217,9 +217,8 @@ impl<'a, A: Air> CompositionAir<'a, A> {
         let l = &self.lay;
         let mut v = vec![row[l.qs], row[l.qs + 1]];
         if self.chal_links.is_none() {
-            v.extend_from_slice(&row[l.chal..l.chal + 20]);
+            v.extend_from_slice(&row[l.chal..l.chal + 24]);
         }
-        v.extend_from_slice(&row[l.chal + 20..l.chal + 24]);
         v
     }
 
@@ -461,7 +460,7 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         self.walk(&mut row, Some(out));
     }
     fn num_bus(&self) -> usize {
-        2 + 5 + self.leaf_chunks().iter().sum::<usize>()
+        2 + 6 + self.leaf_chunks().iter().sum::<usize>()
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         let mut t = Vec::with_capacity(2);
@@ -481,6 +480,9 @@ impl<A: Air> Air for CompositionAir<'_, A> {
             };
             out.push(BusTuple { tag: crate::transcript_air::TAG_EXT, values: crate::transcript_air::ext_tuple(k, &cur[l.chal + 4 * c..l.chal + 4 * c + 4]), weight: w });
         }
+        // S / N from the public-sum table
+        let w = if self.chal_links.is_some() { cur[l.act] } else { 0 };
+        out.push(BusTuple { tag: crate::public_sum_air::TAG_SN, values: cur[l.chal + 20..l.chal + 24].to_vec(), weight: w });
         // leaf chunks: (leaf id, chunk index, 8 words), sent to the leaf hash AIR
         let l = &self.lay;
         let m = RNS_MODULI[ch];

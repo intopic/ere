@@ -130,6 +130,12 @@ pub trait Air: Sync {
     fn bus_sum(&self, _c: &Challenges, _ch: usize) -> Extension4 {
         Extension4::ZERO
     }
+    /// The public tuples behind `bus_sum` (sum of weight / fingerprint), for AIRs verified
+    /// recursively: the recursion computes S inside an AIR (`public_sum_air`).
+    fn public_tuples(&self, _ch: usize) -> Vec<BusTuple> {
+        assert_eq!(self.num_bus(), 0, "this AIR does not expose its public tuples");
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

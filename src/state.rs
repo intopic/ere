@@ -261,27 +261,29 @@ impl Air for StateAir<'_> {
     }
     /// init - final - public txs, in lane `ch`'s field.
     fn bus_sum(&self, ch_c: &Challenges, ch: usize) -> Extension4 {
+        let tuples = self.public_tuples(ch);
+        let dens: Vec<Extension4> = tuples.iter().map(|t| ch_c.fingerprint(t.tag, &t.values, ch)).collect();
+        let Some(inv) = crate::logup::batch_inverse_ext4(&dens, ch) else {
+            return Extension4::ONE; // beta hit a public fingerprint (negligible); the proof will fail
+        };
+        inv.iter().zip(&tuples).fold(Extension4::ZERO, |acc, (x, t)| acc.add(&x.mul_scalar(t.weight, ch), ch))
+    }
+    fn public_tuples(&self, ch: usize) -> Vec<BusTuple> {
         let st = self.st;
-        let mut dens: Vec<Extension4> = Vec::new();
-        let mut signs: Vec<bool> = Vec::new();
+        let m = RNS_MODULI[ch];
+        let mut out = Vec::new();
         for (id, s) in st.states[ch].iter().enumerate() {
-            dens.push(ch_c.fingerprint(TAG_MEM, &mem_values(id as u32, s.nonce, 0, &bal_bytes(s.balance)), ch));
-            signs.push(true);
+            out.push(BusTuple { tag: TAG_MEM, values: mem_values(id as u32, s.nonce, 0, &bal_bytes(s.balance)).to_vec(), weight: 1 });
         }
         for (id, s) in st.states[ch + 1].iter().enumerate() {
-            dens.push(ch_c.fingerprint(TAG_MEM, &mem_values(id as u32, s.nonce, st.final_ts[ch][id], &bal_bytes(s.balance)), ch));
-            signs.push(false);
+            out.push(BusTuple { tag: TAG_MEM, values: mem_values(id as u32, s.nonce, st.final_ts[ch][id], &bal_bytes(s.balance)).to_vec(), weight: m - 1 });
         }
         for (k, tx) in st.lanes[ch].iter().enumerate() {
             let mut v = vec![k as u32 + 1, tx.from, tx.to, tx.nonce];
             v.extend_from_slice(&bal_bytes(tx.amount));
-            dens.push(ch_c.fingerprint(TAG_TX, &v, ch));
-            signs.push(false);
+            out.push(BusTuple { tag: TAG_TX, values: v, weight: m - 1 });
         }
-        let Some(inv) = crate::logup::batch_inverse_ext4(&dens, ch) else {
-            return Extension4::ONE; // beta hit a public fingerprint (negligible); the proof will fail
-        };
-        inv.iter().zip(&signs).fold(Extension4::ZERO, |acc, (x, &plus)| if plus { acc.add(x, ch) } else { acc.sub(x, ch) })
+        out
     }
 }
 

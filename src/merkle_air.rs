@@ -167,9 +167,14 @@ impl Air for MerkleAir {
         v.push(self.link_leaves as u8);
         v.push(self.link_roots as u8);
         for c in &self.claims {
-            for x in c.leaf.iter().chain(&c.root).chain([&c.index, &c.depth]) {
-                v.extend_from_slice(&x.to_le_bytes());
+            // only what the bus sum uses is public
+            if !self.link_leaves {
+                v.extend(c.leaf.iter().chain([&c.index]).flat_map(|x| x.to_le_bytes()));
             }
+            if !self.link_roots {
+                v.extend(c.root.iter().flat_map(|x| x.to_le_bytes()));
+            }
+            v.extend_from_slice(&c.depth.to_le_bytes());
         }
         v
     }
