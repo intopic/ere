@@ -170,7 +170,7 @@ pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: 
     let mut roots = Vec::new();
     for _ in 0..params.log_degree {
         let tree = Tree::build(t.mode(), layers.last().unwrap());
-        t.absorb(b"fri/root", &tree.root());
+        t.absorb_digest(b"fri/root", &tree.root());
         roots.push(tree.root());
         trees.push(tree);
         let alphas = t.challenge_ext4_all(b"fri/alpha");
@@ -227,7 +227,7 @@ fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: 
     t.absorb(b"fri/params", &[params.log_degree as u8, params.log_blowup as u8, params.num_queries as u8]);
     let mut alphas = Vec::with_capacity(rounds);
     for root in &proof.layer_roots {
-        t.absorb(b"fri/root", root);
+        t.absorb_digest(b"fri/root", root);
         alphas.push(t.challenge_ext4_all(b"fri/alpha"));
     }
     absorb_final(t, &proof.final_layer);

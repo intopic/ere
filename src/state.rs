@@ -551,6 +551,22 @@ mod tests {
     }
 
     #[test]
+    fn poseidon2_mode_proves_and_rejects() {
+        use crate::hash::HashMode;
+        let (addrs, old, txs) = setup(300);
+        let (st, traces) = build(&addrs, &old, &txs, 8, true).unwrap();
+        let t = || Transcript::with_mode(b"state-test", HashMode::Poseidon2);
+        let t0 = std::time::Instant::now();
+        let proof = prove(&st, &traces, &P, &mut t());
+        eprintln!("poseidon2 state proof: {:?}", t0.elapsed());
+        assert!(verify(&st, &st.old_root(), &st.new_root(), &proof, &P, &mut t()));
+        assert!(!verify(&st, &st.old_root(), &st.new_root(), &proof, &P, &mut Transcript::with_mode(b"state-test", HashMode::Poseidon)));
+        let mut bad = proof.clone();
+        bad.openings[2][1].aux[4][7].c[0] ^= 1;
+        assert!(!verify(&st, &st.old_root(), &st.new_root(), &bad, &P, &mut t()));
+    }
+
+    #[test]
     fn proof_from_one_lane_split_cannot_be_reused() {
         let (addrs, old, txs) = setup(100);
         let (st, traces) = build(&addrs, &old, &txs, 8, true).unwrap();

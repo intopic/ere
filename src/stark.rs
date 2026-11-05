@@ -370,7 +370,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
     let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| main_hs[ch].iter().map(|col| coset_lde(col, blowup, ch)).collect());
     let mode = t.mode();
     let main_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&main_lde, i))));
-    t.absorb(b"stark/main", &main_tree.root());
+    t.absorb_digest(b"stark/main", &main_tree.root());
     let chals = draw_challenges(t);
 
     // ---- 2. aux trace on the trace domain, then LDE
@@ -417,7 +417,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols.iter().map(|col| coset_lde_ext(col, blowup, ch)).collect()
     });
     let aux_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/aux", &aux_values(&aux_lde, i))));
-    t.absorb(b"stark/aux", &aux_tree.root());
+    t.absorb_digest(b"stark/aux", &aux_tree.root());
     let gammas = t.challenge_ext4_all(b"stark/gamma");
 
     // ---- 3. quotient Q = C / (X^N - 1) on the LDE coset
@@ -457,7 +457,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         out
     });
     let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &std::array::from_fn(|ch| quotient[ch][i]))));
-    t.absorb(b"stark/quotient", &q_tree.root());
+    t.absorb_digest(b"stark/quotient", &q_tree.root());
     let deltas = t.challenge_ext4_all(b"stark/delta");
 
     // ---- 4. FRI on the random combination
@@ -510,11 +510,11 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         return false;
     }
     start_transcript(t, air, params, proof.rows);
-    t.absorb(b"stark/main", &proof.main_root);
+    t.absorb_digest(b"stark/main", &proof.main_root);
     let chals = draw_challenges(t);
-    t.absorb(b"stark/aux", &proof.aux_root);
+    t.absorb_digest(b"stark/aux", &proof.aux_root);
     let gammas = t.challenge_ext4_all(b"stark/gamma");
-    t.absorb(b"stark/quotient", &proof.q_root);
+    t.absorb_digest(b"stark/quotient", &proof.q_root);
     let deltas = t.challenge_ext4_all(b"stark/delta");
     let shifts: [u32; DEFAULT_RNS_CHANNELS] = std::array::from_fn(shift);
     let tcs: [Vec<u32>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(table_coeffs);

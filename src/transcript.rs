@@ -25,6 +25,60 @@ pub struct Transcript {
     state: [u8; 32],
     counter: u64,
     sponge: Option<PoseidonSponge<Fr>>,
+    p2: Option<Poseidon2Duplex>,
+}
+
+/// Duplex sponge over Poseidon2-KoalaBear: rate 8, capacity 8. Absorbing overwrites rate words
+/// and permutes per block of 8; squeezing permutes and reads the rate.
+#[derive(Clone)]
+pub struct Poseidon2Duplex {
+    pub state: [u32; crate::poseidon2::WIDTH],
+    pending: Vec<u32>,
+    out: Vec<u32>,
+}
+
+impl Poseidon2Duplex {
+    pub fn new(domain: &[u32]) -> Self {
+        let mut d = Self { state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new() };
+        d.absorb(domain);
+        d
+    }
+    pub fn absorb(&mut self, words: &[u32]) {
+        self.out.clear();
+        self.pending.extend_from_slice(words);
+        while self.pending.len() >= 8 {
+            let block: Vec<u32> = self.pending.drain(..8).collect();
+            self.state[..8].copy_from_slice(&block);
+            crate::poseidon2::permute(&mut self.state);
+        }
+    }
+    pub fn squeeze(&mut self) -> u32 {
+        if self.out.is_empty() {
+            // pad the pending block with its length marker and permute
+            let mut block = std::mem::take(&mut self.pending);
+            block.push(1);
+            block.resize(8, 0);
+            self.state[..8].copy_from_slice(&block);
+            crate::poseidon2::permute(&mut self.state);
+            self.out = self.state[..8].iter().rev().copied().collect();
+        }
+        self.out.pop().unwrap()
+    }
+}
+
+/// KoalaBear words a Poseidon2 transcript absorbs for one byte message: tag, length and the
+/// data in 3-byte chunks (each < 2^24 < p).
+pub fn poseidon2_message(label: &[u8], data: &[u8]) -> Vec<u32> {
+    let mut v = vec![crate::hash::tag_word(label), data.len() as u32];
+    v.extend(data.chunks(3).map(|c| c.iter().rev().fold(0u32, |a, &b| (a << 8) | b as u32)));
+    v
+}
+
+/// Words for an absorbed digest: tag, the marker 2^30 (never a byte-message length here), 8 words.
+pub fn poseidon2_digest(label: &[u8], d: &[u32; 8]) -> Vec<u32> {
+    let mut v = vec![crate::hash::tag_word(label), 1 << 30];
+    v.extend_from_slice(d);
+    v
 }
 
 /// Field elements a Poseidon transcript absorbs for one message (shared with the circuit).
@@ -50,18 +104,36 @@ impl Transcript {
             s.absorb(&poseidon_message(b"SS-RAP/v2/transcript", label));
             s
         });
-        Self { state: *h.finalize().as_bytes(), counter: 0, sponge }
+        let p2 = (mode == HashMode::Poseidon2).then(|| Poseidon2Duplex::new(&poseidon2_message(b"SS-RAP/v2/transcript", label)));
+        Self { state: *h.finalize().as_bytes(), counter: 0, sponge, p2 }
     }
 
     pub fn mode(&self) -> HashMode {
         if self.sponge.is_some() {
             HashMode::Poseidon
+        } else if self.p2.is_some() {
+            HashMode::Poseidon2
         } else {
             HashMode::Blake3
         }
     }
 
+    /// Absorbs a commitment root. Same as `absorb` except in Poseidon2 mode, where the digest
+    /// goes in as its 8 field words (what the recursion AIR sees).
+    pub fn absorb_digest(&mut self, label: &[u8], h: &crate::hash::Hash) {
+        if let Some(d) = self.p2.as_mut() {
+            d.absorb(&poseidon2_digest(label, &crate::hash::hash_to_words(h)));
+            return;
+        }
+        self.absorb(label, h);
+    }
+
     fn squeeze_u64(&mut self) -> Option<u64> {
+        if let Some(d) = self.p2.as_mut() {
+            // two words: w1 * p + w2 is uniform on [0, p^2), p^2 > 2^61
+            let (w1, w2) = (d.squeeze() as u64, d.squeeze() as u64);
+            return Some(w1 * crate::poseidon2::P as u64 + w2);
+        }
         let s = self.sponge.as_mut()?;
         let x = s.squeeze_field_elements::<Fr>(1)[0];
         Some(u64::from_le_bytes(x.into_bigint().to_bytes_le()[..8].try_into().unwrap()))
@@ -69,6 +141,10 @@ impl Transcript {
 
     /// Absorb a labelled message. Length-prefixed so that messages cannot be re-split.
     pub fn absorb(&mut self, label: &[u8], data: &[u8]) {
+        if let Some(d) = self.p2.as_mut() {
+            d.absorb(&poseidon2_message(label, data));
+            return;
+        }
         if let Some(s) = self.sponge.as_mut() {
             s.absorb(&poseidon_message(label, data));
             return;
