@@ -64,6 +64,16 @@ impl TranscriptVar {
         self.sponge.absorb(&msg)
     }
 
+    /// A message of 16 constant bytes followed by a 32-byte digest (the state AIR's statement):
+    /// (prefix, low 128 bits, high 128 bits).
+    pub fn absorb_prefixed_digest(&mut self, label: &[u8], prefix: &[u8; 16], digest: &FpVar<Fr>) -> R<()> {
+        let bits = digest.to_bits_le()?;
+        let lo = Boolean::le_bits_to_fp(&bits[..128])?;
+        let hi = Boolean::le_bits_to_fp(&bits[128..])?;
+        let msg = vec![FpVar::constant(tag_fr(label)), FpVar::constant(Fr::from(48u64)), FpVar::constant(ark_ff::PrimeField::from_le_bytes_mod_order(prefix)), lo, hi];
+        self.sponge.absorb(&msg)
+    }
+
     /// One squeezed element, its low 64 bits (what the native `squeeze_u64` uses).
     fn squeeze_low64(&mut self) -> R<Vec<Boolean<Fr>>> {
         let x = self.sponge.squeeze_field_elements(1)?.remove(0);

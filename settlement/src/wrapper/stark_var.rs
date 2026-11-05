@@ -13,6 +13,7 @@
 use super::fp31::{range_witness, E4, M31};
 use super::fri_var::{verify_fri, FriProofVar, Lanes};
 use super::hash_var::{digest_witness, leaf_hash, merkle_root, value31, TranscriptVar};
+use super::statement_var::StatementVar;
 use ark_bn254::Fr;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
@@ -33,15 +34,16 @@ pub type TupleVar = (u32, Vec<M31>, M31);
 
 /// An AIR the circuit can evaluate (the in-circuit twin of `ss_rap_v2::stark::Air`).
 pub trait AirCircuit {
-    fn statement(&self) -> Vec<u8>;
+    /// Absorbs the statement message (`stark/statement`) as the native transcript does.
+    fn absorb_statement(&self, t: &mut TranscriptVar) -> R<()>;
     fn width(&self) -> usize;
     fn byte_cols(&self) -> usize;
     fn num_bus(&self) -> usize;
     /// Constraint values (lazy, reduced mod m only by the caller's final check).
     fn eval(&self, c: &[M31], nx: &[M31], first_row: &M31, not_last: &M31, ch: usize) -> Vec<M31>;
     fn bus_tuples(&self, c: &[M31], ch: usize) -> Vec<TupleVar>;
-    /// The public tuples of lane `ch` (tag, values, weight), as the native `public_tuples`.
-    fn public_tuples(&self, ch: usize) -> Vec<(u32, Vec<u32>, u32)>;
+    /// The public tuples of lane `ch`, as the native `public_tuples`.
+    fn public_tuples(&self, ch: usize) -> Vec<TupleVar>;
 }
 
 fn ext_witness(cs: &ConstraintSystemRef<Fr>, x: Option<[u32; 4]>, ch: usize) -> R<E4> {
@@ -170,7 +172,7 @@ pub fn verify_stark<A: AirCircuit>(cs: &ConstraintSystemRef<Fr>, air: &A, p: &St
     let (inv_t, bus0, sum_col) = (bytes, bytes + 1, bytes + 1 + nbus);
 
     let mut t = TranscriptVar::new(cs, label)?;
-    t.absorb_const(b"stark/statement", &air.statement())?;
+    air.absorb_statement(&mut t)?;
     t.absorb_const(b"stark/shape", &[params.log_rows as u8, params.log_blowup as u8, params.num_queries as u8])?;
     t.absorb_const(b"stark/rows", &(rows as u64).to_le_bytes())?;
     t.absorb_root(b"stark/main", &p.main_root)?;
@@ -197,13 +199,12 @@ pub fn verify_stark<A: AirCircuit>(cs: &ConstraintSystemRef<Fr>, air: &A, p: &St
         let rp = powers(cs, &rho[ch], max_len + 1)?;
         // S = sum_t w_t / fp_t over the public tuples
         let mut s = e4_zero(ch);
-        for (tag, vals, wt) in air.public_tuples(ch) {
-            let vs: Vec<M31> = vals.iter().map(|&v| M31::constant(v, ch)).collect();
+        for (tag, vs, wt) in air.public_tuples(ch) {
             let fp = fingerprint(&beta[ch], &rp, &M31::constant(tag, ch), &vs);
             let fv = fp.value().map(|c| Extension4::new(c[0], c[1], c[2], c[3]));
             let inv = ext_witness(cs, fv.map(|f| f.inverse(ch).c), ch)?;
             inv.mul(&fp).sub(&e4_const(Extension4::ONE, ch)).assert_zero(cs)?;
-            s = tame_e4(&s.add(&inv.mul_base(&M31::constant(wt, ch))), cs, 200)?;
+            s = tame_e4(&s.add(&inv.mul_base(&wt)), cs, 200)?;
         }
         let n_inv = mod_inv_single(n_rows as u32 % RNS_MODULI[ch], RNS_MODULI[ch]);
         s_over_n.push(E4 { c: std::array::from_fn(|k| s.c[k].mul_const(n_inv)) }.reduce(cs)?);
@@ -307,14 +308,13 @@ pub fn verify_stark<A: AirCircuit>(cs: &ConstraintSystemRef<Fr>, air: &A, p: &St
 
 // ---- the state AIR in circuit form -------------------------------------------------------------
 
-pub struct StateCircuit<'a> {
-    pub st: &'a ss_rap_v2::state::StateStatement,
+pub struct StateCircuit {
+    pub stmt: StatementVar,
 }
 
-impl AirCircuit for StateCircuit<'_> {
-    fn statement(&self) -> Vec<u8> {
-        use ss_rap_v2::stark::Air;
-        ss_rap_v2::state::StateAir { st: self.st }.statement()
+impl AirCircuit for StateCircuit {
+    fn absorb_statement(&self, t: &mut TranscriptVar) -> R<()> {
+        t.absorb_prefixed_digest(b"stark/statement", b"state-transfer-2", &self.stmt.digest)
     }
     fn width(&self) -> usize {
         ss_rap_v2::state::WIDTH
@@ -373,15 +373,15 @@ impl AirCircuit for StateCircuit<'_> {
             (TAG_TX, tx, neg),
         ]
     }
-    fn public_tuples(&self, ch: usize) -> Vec<(u32, Vec<u32>, u32)> {
-        use ss_rap_v2::stark::Air;
-        ss_rap_v2::state::StateAir { st: self.st }.public_tuples(ch).into_iter().map(|t| (t.tag, t.values, t.weight)).collect()
+    fn public_tuples(&self, ch: usize) -> Vec<TupleVar> {
+        self.stmt.public_tuples(ch)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wrapper::statement_var::StatementShape;
     use ark_relations::r1cs::ConstraintSystem;
     use ss_rap_v2::hash::HashMode;
     use ss_rap_v2::state::{self, AccountState, Transfer};
@@ -407,7 +407,7 @@ mod tests {
 
     fn run(st: &state::StateStatement, proof: &StarkProof) -> (bool, usize) {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        let air = StateCircuit { st };
+        let air = StateCircuit { stmt: StatementVar::witness(&cs, Some(st), StatementShape::of(st, P.log_rows)).unwrap() };
         let pv = StarkProofVar::witness(&cs, &air, Some(proof), &P).unwrap();
         verify_stark(&cs, &air, &pv, &P, st.num_txs(), b"r8-stark").unwrap();
         (cs.is_satisfied().unwrap(), cs.num_constraints())

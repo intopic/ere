@@ -6,6 +6,7 @@
 use ark_bn254::Fr;
 use ark_relations::r1cs::ConstraintSystem;
 use ss_rap_settlement::wrapper::stark_var::{verify_stark, StarkProofVar, StateCircuit};
+use ss_rap_settlement::wrapper::statement_var::{StatementShape, StatementVar};
 use ss_rap_v2::hash::HashMode;
 use ss_rap_v2::state::{self, AccountState, Transfer};
 use ss_rap_v2::transcript::Transcript;
@@ -33,11 +34,12 @@ fn main() {
     let proof = state::prove(&st, &traces, &p, &mut t());
     println!("state proof ({n_tx} tx, blowup {}, {queries} queries): {:?}", 1 << log_blowup, t0.elapsed());
     let cs = ConstraintSystem::<Fr>::new_ref();
-    let air = StateCircuit { st: &st };
     let t0 = Instant::now();
+    let air = StateCircuit { stmt: StatementVar::witness(&cs, Some(&st), StatementShape::of(&st, p.log_rows)).unwrap() };
+    let after_statement = cs.num_constraints();
     let pv = StarkProofVar::witness(&cs, &air, Some(&proof), &p).unwrap();
-    let after_witness = cs.num_constraints();
+    let after_witness = cs.num_constraints() - after_statement;
     verify_stark(&cs, &air, &pv, &p, st.num_txs(), b"settle").unwrap();
-    println!("circuit: {} constraints ({} for witnessing the proof), built in {:?}", cs.num_constraints(), after_witness, t0.elapsed());
+    println!("circuit: {} constraints (statement {after_statement}, proof witness {after_witness}), built in {:?}", cs.num_constraints(), t0.elapsed());
     println!("satisfied: {}", cs.is_satisfied().unwrap());
 }
