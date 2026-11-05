@@ -23,6 +23,9 @@
 //! In R7 the alphas and indices come from the sponge AIR instead of the public claim.
 //!
 //! Every constraint has degree <= 2; width 36, 28 constraints.
+//!
+//! In a stack (R7) the layer-0 pair of every query is received from the composition AIR
+//! (`link_layer0`), so the values FRI folds are the ones the composition was checked on.
 
 use crate::stark::{Air, BusTerm, Challenges, Point};
 use crate::{add_mod, mul_mod_channel, sub_mod, Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
@@ -61,7 +64,13 @@ pub struct FriFoldAir {
     pub alphas: Vec<Extension4>,
     pub indices: Vec<usize>,
     pub final_value: Extension4,
+    /// Receive the layer-0 values from the composition AIR in the same stack (R7): row (q, 0)
+    /// takes (q, 0, x, f0) and (q, 1, -x, f1) on the `LINK_LAYER0` bus.
+    pub link_layer0: bool,
 }
+
+/// Bus tag shared with `composition_air`: (q, slot, x, f) of a layer-0 opening.
+pub const LINK_LAYER0: u32 = 10;
 
 fn ext(row: &[u32], at: usize) -> Extension4 {
     Extension4::new(row[at], row[at + 1], row[at + 2], row[at + 3])
@@ -218,14 +227,22 @@ impl Air for FriFoldAir {
         debug_assert_eq!(out.len() - start, NUM_CONSTRAINTS);
     }
     fn num_bus(&self) -> usize {
-        1
+        3
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         if ch != self.lane {
-            out.push(BusTerm { den: c.beta, weight: 0 });
+            out.extend([BusTerm { den: c.beta, weight: 0 }; 3]);
             return;
         }
-        out.push(BusTerm { den: c.fingerprint(TAG, &Self::row_tuple(cur), ch), weight: sub_mod(0, cur[ACT], RNS_MODULI[ch]) });
+        let m = RNS_MODULI[ch];
+        out.push(BusTerm { den: c.fingerprint(TAG, &Self::row_tuple(cur), ch), weight: sub_mod(0, cur[ACT], m) });
+        let w = if self.link_layer0 { cur[FIRST] } else { 0 };
+        let mut v0 = vec![cur[Q], 0, cur[X]];
+        v0.extend_from_slice(&cur[F0..F0 + 4]);
+        let mut v1 = vec![cur[Q], 1, sub_mod(0, cur[X], m)];
+        v1.extend_from_slice(&cur[F1..F1 + 4]);
+        out.push(BusTerm { den: c.fingerprint(LINK_LAYER0, &v0, ch), weight: w });
+        out.push(BusTerm { den: c.fingerprint(LINK_LAYER0, &v1, ch), weight: w });
     }
     fn bus_sum(&self, c: &Challenges, ch: usize) -> Extension4 {
         if ch != self.lane {
@@ -283,6 +300,7 @@ mod tests {
             alphas: view.alphas.iter().map(|a| a[j]).collect(),
             indices: view.indices,
             final_value: proof.final_layer[j][0],
+            link_layer0: false,
         };
         let pairs = proof.queries.iter().map(|q| q.iter().map(|o| o.pair[j]).collect()).collect();
         (air, pairs, proof)

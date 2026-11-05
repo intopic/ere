@@ -55,6 +55,9 @@ pub struct CompositionAir<'a, A: Air> {
     pub delta: Extension4,
     pub s_over_n: Extension4,
     pub claims: Vec<OpeningClaim>,
+    /// Send (q, slot, x, f) to the FRI fold AIR in the same stack instead of to the public
+    /// claim (R7): then x and f need not be public.
+    pub link_fri: bool,
     lay: Lay,
     table: Vec<u32>,
 }
@@ -170,7 +173,7 @@ impl<'a, A: Air> CompositionAir<'a, A> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(inner: &'a A, lane: usize, inner_params: StarkParams, chals: Challenges, gamma: Extension4, delta: Extension4, s_over_n: Extension4, claims: Vec<OpeningClaim>) -> Self {
         let lay = Lay::new(inner, &inner_params, lane);
-        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, lay, table: table_coeffs(lane) }
+        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, link_fri: false, lay, table: table_coeffs(lane) }
     }
 
     fn n_lde(&self) -> usize {
@@ -183,8 +186,7 @@ impl<'a, A: Air> CompositionAir<'a, A> {
     }
 
     fn public_tuple(&self, c: &OpeningClaim) -> Vec<u32> {
-        let mut v = vec![c.q as u32, c.slot as u32, self.x_of(c.pos)];
-        v.extend(c.f.c);
+        let mut v = vec![c.q as u32, c.slot as u32];
         for e in [self.chals.alpha, self.chals.beta, self.chals.rho, self.gamma, self.delta, self.s_over_n] {
             v.extend(e.c);
         }
@@ -193,9 +195,22 @@ impl<'a, A: Air> CompositionAir<'a, A> {
 
     fn row_tuple(&self, row: &[u32]) -> Vec<u32> {
         let l = &self.lay;
+        let mut v = vec![row[l.qs], row[l.qs + 1]];
+        v.extend_from_slice(&row[l.chal..l.chal + 24]);
+        v
+    }
+
+    /// (q, slot, x, f): to the FRI fold AIR, or to the public claim.
+    fn layer0_tuple(&self, row: &[u32]) -> Vec<u32> {
+        let l = &self.lay;
         let mut v = vec![row[l.qs], row[l.qs + 1], row[l.x]];
         v.extend_from_slice(&row[l.f..l.f + 4]);
-        v.extend_from_slice(&row[l.chal..l.chal + 24]);
+        v
+    }
+
+    fn public_layer0(&self, c: &OpeningClaim) -> Vec<u32> {
+        let mut v = vec![c.q as u32, c.slot as u32, self.x_of(c.pos)];
+        v.extend(c.f.c);
         v
     }
 
@@ -345,8 +360,12 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         for x in [self.lane as u32, self.inner_params.log_rows, self.inner_params.log_blowup, self.claims.len() as u32] {
             v.extend_from_slice(&x.to_le_bytes());
         }
+        v.push(self.link_fri as u8);
         for c in &self.claims {
             v.extend(self.public_tuple(c).iter().flat_map(|x| x.to_le_bytes()));
+            if !self.link_fri {
+                v.extend(self.public_layer0(c).iter().flat_map(|x| x.to_le_bytes()));
+            }
         }
         v
     }
@@ -369,16 +388,23 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         self.walk(&mut row, Some(out));
     }
     fn num_bus(&self) -> usize {
-        1
+        2
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
-        out.push(BusTerm { den: c.fingerprint(TAG, &self.row_tuple(cur), ch), weight: sub_mod(0, cur[self.lay.act], RNS_MODULI[ch]) });
+        let mut t = Vec::with_capacity(2);
+        self.bus_tuples(cur, ch, &mut t);
+        crate::stark::bus_from_tuples(&t, c, ch, out);
     }
     fn bus_tuples(&self, cur: &[u32], ch: usize, out: &mut Vec<BusTuple>) {
-        out.push(BusTuple { tag: TAG, values: self.row_tuple(cur), weight: sub_mod(0, cur[self.lay.act], RNS_MODULI[ch]) });
+        let neg = sub_mod(0, cur[self.lay.act], RNS_MODULI[ch]);
+        out.push(BusTuple { tag: TAG, values: self.row_tuple(cur), weight: neg });
+        out.push(BusTuple { tag: crate::fri_air::LINK_LAYER0, values: self.layer0_tuple(cur), weight: neg });
     }
     fn bus_sum(&self, c: &Challenges, ch: usize) -> Extension4 {
-        let dens: Vec<Extension4> = self.claims.iter().map(|cl| c.fingerprint(TAG, &self.public_tuple(cl), ch)).collect();
+        let mut dens: Vec<Extension4> = self.claims.iter().map(|cl| c.fingerprint(TAG, &self.public_tuple(cl), ch)).collect();
+        if !self.link_fri {
+            dens.extend(self.claims.iter().map(|cl| c.fingerprint(crate::fri_air::LINK_LAYER0, &self.public_layer0(cl), ch)));
+        }
         match crate::logup::batch_inverse_ext4(&dens, ch) {
             Some(inv) => inv.iter().fold(Extension4::ZERO, |a, x| a.sub(x, ch)),
             None => Extension4::ONE,
