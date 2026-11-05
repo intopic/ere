@@ -3,7 +3,7 @@
 //! Measures the wrapper gadgets and projects the size of a BN254 circuit that verifies the
 //! state-transition STARK directly, for a few parameter choices.
 
-use ss_rap_settlement::wrapper::cost::{measure, project, state_shape};
+use ss_rap_settlement::wrapper::cost::{measure, project, state_shape, ProofShape};
 
 fn main() {
     if let Some(n) = std::env::args().nth(1).and_then(|s| s.parse().ok()) {
@@ -22,6 +22,20 @@ fn main() {
     ] {
         let p = project(&state_shape(q, lb, pack, lazy), &g);
         println!("{:<44} {:>14} {:>14} {:>8.0}%", note, p.per_query, p.total, 100.0 * p.hashing_share);
+    }
+    // The recursive proof of one lane (R7.4 verifier tables, groups printed by bench_recursion):
+    // (log rows, width, constraints, bus terms). Verified directly in the circuit, x 5 lanes.
+    let groups = [(8u32, 2610usize, 1986usize, 154usize), (9, 37, 29, 9), (10, 100, 72, 7), (13, 629, 603, 5), (14, 637, 618, 2)];
+    println!("{:<44} {:>14} {:>14}", "recursive proof (R7.4) in Groth16, 5 lanes", "per query", "total");
+    for (q, lb, note) in [(25, 4, "blowup 16, 25 queries"), (16, 6, "blowup 64, 16 queries"), (11, 8, "blowup 256, 11 queries")] {
+        let per_query: usize = groups
+            .iter()
+            .map(|&(log, w, c, b)| {
+                let shape = ProofShape { lanes: 1, main_cols: w + 1, aux_cols: 1 + b + 1, composition_terms: c + 1 + b + 1, log_domain: log + lb, fri_layers: log as usize, queries: q, pack: 7, lazy: true };
+                project(&shape, &g).per_query
+            })
+            .sum();
+        println!("{:<44} {:>14} {:>14}", note, per_query, 5 * q * per_query);
     }
 }
 

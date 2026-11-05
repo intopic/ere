@@ -79,6 +79,16 @@ fn main() {
         return;
     }
     let mut cells = 0usize;
+    for (name, _, _) in tables {
+        let _ = name;
+    }
+    {
+        let all: [&dyn Air; 10] = [&alg.composition, &alg.fold, &alg.leaves, &alg.merkle, &alg.transcript, &alg.pid_roots, &alg.tree_roots, &alg.final_air, &alg.index, &alg.public_sum];
+        for (ks, log) in alg.groups() {
+            let (w, c, b, by): (usize, usize, usize, usize) = ks.iter().fold((0, 0, 0, 0), |a, &k| (a.0 + all[k].width(), a.1 + all[k].num_constraints(), a.2 + all[k].num_bus(), a.3 + all[k].byte_cols()));
+            println!("shape 2^{log}: width {w}, constraints {c}, bus terms {b}, byte cols {by}");
+        }
+    }
     for (ks, log) in alg.groups() {
         let w: usize = ks.iter().map(|&k| tables[k].2).sum();
         let names: Vec<&str> = ks.iter().map(|&k| tables[k].0).collect();
