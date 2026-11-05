@@ -1,7 +1,8 @@
-//! cargo run --release --example bench_stark_mulmod [log_rows]
+//! cargo run --release --example bench_stark_mulmod [log_rows_per_lane]
 //!
 //! End-to-end STARK (Phase A, CPU, single machine) for a batch of EVM uint256 MULMOD operations
-//! on secp256k1: trace -> LogUp -> quotient -> unified FRI over 5 RNS channels -> verify.
+//! on secp256k1: trace -> LogUp -> quotient -> unified FRI over 5 RNS lanes -> verify.
+//! Each lane (one RNS channel) holds 2^log_rows operations, so the batch is 5 * 2^log_rows.
 //! 50 FRI queries with blowup 4 (~100 bits, conjectured FRI soundness).
 
 use num_bigint::BigUint;
@@ -24,7 +25,7 @@ fn main() {
             .collect();
         BigUint::new(w) % &p.value
     };
-    let n = 1usize << log_rows;
+    let n = 5usize << log_rows;
     let rows: Vec<MulModRow> = (0..n).map(|_| MulModRow::generate(&next(), &next(), &p)).collect();
 
     let t0 = Instant::now();
@@ -35,7 +36,7 @@ fn main() {
     let t_verify = t0.elapsed().as_secs_f64();
     assert!(ok, "proof must verify");
 
-    println!("STARK uint256 MULMOD (secp256k1), {n} operations, 5 RNS channels, blowup 4, 50 queries");
+    println!("STARK uint256 MULMOD (secp256k1), {n} operations in 5 RNS lanes, blowup 4, 50 queries");
     println!("  prove        : {:>9.1} ms  ({:.1} us per MULMOD)", t_prove * 1e3, t_prove * 1e6 / n as f64);
     println!("  verify       : {:>9.2} ms", t_verify * 1e3);
     println!("  proof size   : {:>9.1} KiB", proof.size_bytes() as f64 / 1024.0);

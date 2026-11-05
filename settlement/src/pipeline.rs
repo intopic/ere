@@ -91,7 +91,7 @@ pub fn v_umt_root(p: &StarkProof) -> [u8; 32] {
 }
 
 fn stark_params(rows: usize, cfg: &PipelineConfig) -> StarkParams {
-    let log_rows = rows.max(256).next_power_of_two().trailing_zeros();
+    let log_rows = stark::lane_rows(rows).max(256).next_power_of_two().trailing_zeros();
     StarkParams { log_rows, log_blowup: cfg.log_blowup, num_queries: cfg.num_queries }
 }
 

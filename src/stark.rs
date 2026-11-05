@@ -1,20 +1,21 @@
 //! End-to-end STARK for a batch of EVM `MULMOD` operations (Phase A of docs/PLANI_MVP.md).
 //!
 //! It connects every piece of the PDF architecture into one non-interactive proof:
-//!   trace of `uint256` MULMOD rows (64-bit limbs x 5 RNS channels, `uint256.rs`)
+//!   trace of `uint256` MULMOD rows (byte limbs, sound per channel, `uint256.rs`)
 //!   + LogUp byte range check as AIR (inverse columns + running sum, `logup.rs` idea)
 //!   + Fiat-Shamir (`transcript.rs`)
 //!   + coset LDE with the PDF's 2^24 roots (`ntt.rs`)
 //!   + V-UMT commitments: one Merkle tree per stage for all 5 channels
 //!   + unified FRI (`fri.rs`) on a random linear combination of all columns and the quotient.
 //!
-//! Each RNS channel j runs the same AIR over its own field F_{m_j} (challenges in F_{m_j}^4).
-//! The 217 trace columns are bytes, i.e. the same integers in every channel; the per-channel
-//! MULMOD constraints therefore jointly prove the 64-bit column identities over Z (PDF §2.2).
+//! Each RNS channel j is a lane: it runs the same AIR over its own field F_{m_j} (challenges in
+//! F_{m_j}^4) on its own share of the rows. Commitments in different fields cannot be tied to
+//! the same integers, so every lane must be sound alone; the byte-limb MULMOD AIR is (all its
+//! identities stay below m_j / 2). The 5 lanes are proven in parallel and share one FRI.
 //!
 //! Stages:
-//!  1. main trace  (217 byte columns + 1 multiplicity column)       -> root_main -> alpha_j
-//!  2. aux trace   (217 inverses 1/(alpha - byte), 1/(alpha - T), running sum h) -> root_aux -> gamma_j
+//!  1. main trace  (315 byte columns + 1 multiplicity column)       -> root_main -> alpha_j
+//!  2. aux trace   (315 inverses 1/(alpha - byte), 1/(alpha - T), running sum h) -> root_aux -> gamma_j
 //!  3. quotient    Q = C / (X^N - 1), C = sum_k gamma^k * constraint_k  -> root_q -> delta_j
 //!  4. FRI on      f = Q + sum_k delta^(k+1) * column_k                -> query indices
 //!  5. openings of all three trees at x, -x and their next rows, for every FRI query.
@@ -29,7 +30,7 @@ use crate::fri::{self, FriParams, FriProof, Hash, Layer, Tree};
 use crate::logup::batch_inverse_ext4;
 use crate::ntt::{intt, ntt, root_of_unity};
 use crate::transcript::Transcript;
-use crate::uint256::{eval_columns, p_columns, Modulus256, MulModRow, CONSTRAINTS_PER_CHANNEL, NUM_COLUMNS};
+use crate::uint256::{eval_columns, p_columns, Modulus256, MulModRow, PColumns, CONSTRAINTS_PER_CHANNEL, NUM_COLUMNS};
 use crate::{mod_inv_single, mul_mod_channel, sub_mod, Extension4, DEFAULT_RNS_CHANNELS, EXTENSION_BETA, RNS_MODULI};
 use blake3::Hasher;
 use rayon::prelude::*;
@@ -147,7 +148,7 @@ fn table_value(coeffs: &[u32], x: u32, rows: usize, ch: usize) -> u32 {
 
 /// C(x) = sum_k gamma^k * constraint_k at one point of one channel.
 #[allow(clippy::too_many_arguments)]
-fn composition(main: &[u32], aux: &[Extension4], h_next: &Extension4, t: u32, alpha: &Extension4, gamma: &Extension4, pc: &[u32; 4], ch: usize) -> Extension4 {
+fn composition(main: &[u32], aux: &[Extension4], h_next: &Extension4, t: u32, alpha: &Extension4, gamma: &Extension4, pc: &PColumns, ch: usize) -> Extension4 {
     let mut acc = Extension4::ZERO;
     let mut push = |v: Extension4| acc = acc.mul(gamma, ch).add(&v, ch);
     for c in eval_columns(&main[..NUM_COLUMNS], pc, ch) {
@@ -238,38 +239,55 @@ fn start_transcript(t: &mut Transcript, p: &Modulus256, params: &StarkParams, ro
     t.absorb(b"stark/rows", &(rows as u64).to_le_bytes());
 }
 
-/// Proves a batch of MULMOD rows (padded with 0 * 0 rows up to 2^log_rows).
+/// Rows per lane needed for `rows` MULMOD rows spread over the 5 lanes.
+pub fn lane_rows(rows: usize) -> usize {
+    rows.div_ceil(DEFAULT_RNS_CHANNELS)
+}
+
+/// Proves a batch of MULMOD rows. The rows are split into 5 lanes, one per RNS channel: lane j
+/// holds rows [j*N, (j+1)*N) with N = 2^log_rows, padded with 0 * 0 rows. Each lane is a full,
+/// independently sound STARK instance in its own field; all lanes share the commitments, the
+/// transcript and one unified FRI, and are proven in parallel.
 pub fn prove(rows: &[MulModRow], p: &Modulus256, params: &StarkParams, t: &mut Transcript) -> StarkProof {
     let n_rows = 1usize << params.log_rows;
-    assert!(rows.len() <= n_rows, "too many rows for params");
+    assert!(rows.len() <= n_rows * DEFAULT_RNS_CHANNELS, "too many rows for params");
     let pad = MulModRow::generate(&0u32.into(), &0u32.into(), p);
-    let trace: Vec<Vec<u32>> = rows.iter().chain(std::iter::repeat(&pad)).take(n_rows).map(|r| r.limbs()).collect();
-    prove_trace(&trace, rows.len(), p, params, t)
+    let traces: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|lane| {
+        rows.iter().skip(lane * n_rows).chain(std::iter::repeat(&pad)).take(n_rows).map(|r| r.limbs()).collect()
+    });
+    prove_trace_channels(&traces, rows.len(), p, params, t)
 }
 
 /// Proves an arbitrary byte trace (used directly by the attack tests).
 pub fn prove_trace(trace: &[Vec<u32>], real_rows: usize, p: &Modulus256, params: &StarkParams, t: &mut Transcript) -> StarkProof {
+    let traces: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|_| trace.to_vec());
+    prove_trace_channels(&traces, real_rows, p, params, t)
+}
+
+/// Proves one byte trace per lane (RNS channel).
+pub fn prove_trace_channels(traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], real_rows: usize, p: &Modulus256, params: &StarkParams, t: &mut Transcript) -> StarkProof {
     params.check();
     let n_rows = 1usize << params.log_rows;
     let blowup = 1usize << params.log_blowup;
     let n = n_rows * blowup;
-    assert_eq!(trace.len(), n_rows);
     start_transcript(t, p, params, real_rows);
 
-    // ---- 1. main trace: byte columns + multiplicities
-    let mut mult = vec![0u32; n_rows];
-    for row in trace {
-        for &v in row {
-            if (v as usize) < TABLE {
-                mult[v as usize] += 1;
+    // ---- 1. main trace: byte columns + multiplicities (per channel)
+    let main_hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| {
+        let trace = &traces[ch];
+        assert_eq!(trace.len(), n_rows);
+        let mut mult = vec![0u32; n_rows];
+        for row in trace {
+            for &v in row {
+                if (v as usize) < TABLE {
+                    mult[v as usize] += 1;
+                }
             }
         }
-    }
-    let main_h: Vec<Vec<u32>> = (0..MAIN_COLS)
-        .map(|c| if c < NUM_COLUMNS { trace.iter().map(|r| r[c]).collect() } else { mult.clone() })
-        .collect();
+        (0..MAIN_COLS).map(|c| if c < NUM_COLUMNS { trace.iter().map(|r| r[c]).collect() } else { mult.clone() }).collect()
+    });
     let main_lde: [[Vec<u32>; MAIN_COLS]; DEFAULT_RNS_CHANNELS] = per_channel(|ch| {
-        let v: Vec<Vec<u32>> = main_h.iter().map(|col| coset_lde(&col.iter().map(|x| x % RNS_MODULI[ch]).collect::<Vec<_>>(), blowup, ch)).collect();
+        let v: Vec<Vec<u32>> = main_hs[ch].iter().map(|col| coset_lde(&col.iter().map(|x| x % RNS_MODULI[ch]).collect::<Vec<_>>(), blowup, ch)).collect();
         v.try_into().unwrap()
     });
     let main_tree = Tree::from_leaves((0..n).map(|i| main_leaf(&main_lde, i)).collect());
@@ -280,6 +298,8 @@ pub fn prove_trace(trace: &[Vec<u32>], real_rows: usize, p: &Modulus256, params:
     let aux_lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| {
         let m = RNS_MODULI[ch];
         let alpha = alphas[ch];
+        let main_h = &main_hs[ch];
+        let mult = &main_h[MULT];
         let mut cols: Vec<Vec<Extension4>> = Vec::with_capacity(AUX_COLS);
         for c in 0..NUM_COLUMNS {
             let den: Vec<Extension4> = main_h[c].iter().map(|&v| alpha.sub(&Extension4::from_base(v % m), ch)).collect();
@@ -382,7 +402,7 @@ pub fn verify(proof: &StarkProof, p: &Modulus256, params: &StarkParams, t: &mut 
     let n_rows = 1usize << params.log_rows;
     let blowup = 1usize << params.log_blowup;
     let n = n_rows * blowup;
-    if proof.openings.len() != params.num_queries || proof.rows > n_rows {
+    if proof.openings.len() != params.num_queries || proof.rows > n_rows * DEFAULT_RNS_CHANNELS {
         return false;
     }
     start_transcript(t, p, params, proof.rows);
@@ -489,14 +509,46 @@ mod tests {
         let p = Modulus256::bn254();
         let mut trace: Vec<Vec<u32>> = rows(&p, 256, 3).iter().map(|r| r.limbs()).collect();
         let c0 = 160;
-        assert!(trace[5][c0 + 8] >= 1);
-        trace[5][c0 + 7] += 256;
-        trace[5][c0 + 8] -= 1;
+        assert!(trace[5][c0 + 1] >= 1);
+        trace[5][c0] += 256;
+        trace[5][c0 + 1] -= 1;
         for ch in 0..DEFAULT_RNS_CHANNELS {
             assert!(eval_columns(&trace[5], &p_columns(&p, ch), ch).iter().all(|&x| x == 0), "MULMOD AIR alone accepts it");
         }
         let proof = prove_trace(&trace, 256, &p, &PARAMS, &mut Transcript::new(b"stark-test"));
         assert!(!verify(&proof, &p, &PARAMS, &mut Transcript::new(b"stark-test")));
+    }
+
+    /// The 5 channels are not bound to each other (different fields), so they are used as 5
+    /// independent lanes: different rows in every lane verify, and a forgery in a single lane
+    /// is rejected by that lane alone.
+    #[test]
+    fn lanes_are_independent_and_each_is_sound() {
+        let p = Modulus256::secp256k1();
+        let mut traces: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] =
+            std::array::from_fn(|ch| rows(&p, 256, 100 + ch as u64).iter().map(|r| r.limbs()).collect());
+        let proof = prove_trace_channels(&traces, 5 * 256, &p, &PARAMS, &mut Transcript::new(b"stark-test"));
+        assert!(verify(&proof, &p, &PARAMS, &mut Transcript::new(b"stark-test")));
+
+        // Forge r in lane 3 only and refit every carry; the identities can hold mod m_3 only if
+        // they hold over Z, which they do not.
+        let mut row = rows(&p, 1, 100 + 3)[0].clone();
+        let fake = (row.r_value() + 1u32) % &p.value;
+        row.r = crate::uint256::to_bytes32(&fake);
+        row.s = crate::uint256::to_bytes32(&(&p.value - &fake - 1u32));
+        traces[3][0] = row.limbs();
+        assert!(!row.is_satisfied_in(&p, 3));
+        let proof = prove_trace_channels(&traces, 5 * 256, &p, &PARAMS, &mut Transcript::new(b"stark-test"));
+        assert!(!verify(&proof, &p, &PARAMS, &mut Transcript::new(b"stark-test")));
+    }
+
+    #[test]
+    fn full_batch_uses_all_lanes() {
+        let p = Modulus256::bn254();
+        let batch = rows(&p, 5 * 256, 9);
+        let proof = prove(&batch, &p, &PARAMS, &mut Transcript::new(b"stark-test"));
+        assert_eq!(proof.rows, 5 * 256);
+        assert!(verify(&proof, &p, &PARAMS, &mut Transcript::new(b"stark-test")));
     }
 
     #[test]
