@@ -7,6 +7,9 @@ description = "SS-RAP AIRs on the Plonky3 STARK engine (decision 5.11: replace t
 [dependencies]
 ss_rap_v2 = { path = ".." }
 num-bigint = "0.4"
+blake3 = "1.5"
+num-bigint-05 = { package = "num-bigint", version = "0.5" }
+p3-poseidon2 = "=0.9.0-rc.2"
 p3-air = "=0.9.0-rc.2"
 p3-baby-bear = "=0.9.0-rc.2"
 p3-koala-bear = "=0.9.0-rc.2"
@@ -19,6 +22,7 @@ p3-fri = "=0.9.0-rc.2"
 p3-lookup = "=0.9.0-rc.2"
 p3-matrix = "=0.9.0-rc.2"
 p3-maybe-rayon = { version = "=0.9.0-rc.2", features = ["parallel"] }
+p3-bn254 = "=0.9.0-rc.2"
 p3-keccak = "=0.9.0-rc.2"
 p3-monty-31 = "=0.9.0-rc.2"
 p3-merkle-tree = "=0.9.0-rc.2"

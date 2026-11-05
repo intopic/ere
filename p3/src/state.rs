@@ -251,13 +251,8 @@ pub fn lane_airs<F: Field>(st: &StateStatement, lane: usize) -> Vec<LaneAirs<F>>
 }
 
 // ---------------------------------------------------------------------------------------------
-// Prove / verify all 5 lanes
+// Prove / verify all 5 lanes, for each hash backend (Keccak, Poseidon2-BN254)
 // ---------------------------------------------------------------------------------------------
-
-use crate::config::{config, BabyBear, Config, KoalaBear, Lane3, Lane4, Lane5};
-use p3_batch_stark::{prove_batch, verify_batch, BatchProof, ProverData, StarkInstance};
-use p3_field::extension::BinomiallyExtendable;
-use p3_field::{PrimeField32, TwoAdicField};
 
 /// FRI parameters shared by the 5 lanes.
 #[derive(Clone, Copy, Debug)]
@@ -269,70 +264,90 @@ pub struct Params {
     pub budget: usize,
 }
 
-pub struct StateProof {
-    pub l0: BatchProof<Config<BabyBear>>,
-    pub l1: BatchProof<Config<KoalaBear>>,
-    pub l2: BatchProof<Config<Lane3>>,
-    pub l3: BatchProof<Config<Lane4>>,
-    pub l4: BatchProof<Config<Lane5>>,
-}
-
 fn degrees(st: &StateStatement, lane: usize, p: &Params) -> Vec<usize> {
-    vec![p.log_rows, 8, PublicAir::<BabyBear>::new(st, lane).log_rows]
+    vec![p.log_rows, 8, PublicAir::<crate::config::BabyBear>::new(st, lane).log_rows]
 }
 
-fn prove_lane<F>(st: &StateStatement, trace: &[Vec<u32>], lane: usize, p: &Params) -> BatchProof<Config<F>>
-where
-    F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
-{
-    assert_eq!(trace.len(), 1 << p.log_rows);
-    let cfg = config::<F>(p.log_blowup, p.queries);
-    let (airs, traces, degs) = lane_instance::<F>(st, trace, lane);
-    let pd = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; 3], p.log_blowup).unwrap();
-    let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
-    let inst = StarkInstance::new_multiple(&airs, &refs, &[vec![], vec![], vec![]]);
-    prove_batch(&cfg, &inst, &pd).expect("prove")
-}
+macro_rules! backend {
+    ($m:ident, $cfg:path) => {
+        pub mod $m {
+            use super::*;
+            use crate::config::{BabyBear, KoalaBear, Lane3, Lane4, Lane5};
+            use $cfg as cfgmod;
+            use cfgmod::{config, Config};
+            use p3_batch_stark::{prove_batch, verify_batch, BatchProof, ProverData, StarkInstance};
+            use p3_field::extension::BinomiallyExtendable;
+            use p3_field::{PrimeField32, TwoAdicField};
 
-fn verify_lane<F>(st: &StateStatement, proof: &BatchProof<Config<F>>, lane: usize, p: &Params) -> bool
-where
-    F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
-{
-    let cfg = config::<F>(p.log_blowup, p.queries);
-    let airs = lane_airs::<F>(st, lane);
-    let Ok(pd) = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degrees(st, lane, p), &vec![p.budget; 3], p.log_blowup) else {
-        return false;
+            pub struct StateProof {
+                pub l0: BatchProof<Config<BabyBear>>,
+                pub l1: BatchProof<Config<KoalaBear>>,
+                pub l2: BatchProof<Config<Lane3>>,
+                pub l3: BatchProof<Config<Lane4>>,
+                pub l4: BatchProof<Config<Lane5>>,
+            }
+
+            pub fn prove_lane<F>(st: &StateStatement, trace: &[Vec<u32>], lane: usize, p: &Params) -> BatchProof<Config<F>>
+            where
+                F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
+            {
+                assert_eq!(trace.len(), 1 << p.log_rows);
+                let cfg = config::<F>(p.log_blowup, p.queries);
+                let (airs, traces, degs) = lane_instance::<F>(st, trace, lane);
+                let pd = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; 3], p.log_blowup).unwrap();
+                let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
+                let inst = StarkInstance::new_multiple(&airs, &refs, &[vec![], vec![], vec![]]);
+                prove_batch(&cfg, &inst, &pd).expect("prove")
+            }
+
+            pub fn verify_lane<F>(st: &StateStatement, proof: &BatchProof<Config<F>>, lane: usize, p: &Params) -> bool
+            where
+                F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
+            {
+                let cfg = config::<F>(p.log_blowup, p.queries);
+                let airs = lane_airs::<F>(st, lane);
+                let Ok(pd) = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degrees(st, lane, p), &vec![p.budget; 3], p.log_blowup) else {
+                    return false;
+                };
+                verify_batch(&cfg, &airs, proof, &[vec![], vec![], vec![]], &pd.common).is_ok()
+            }
+
+            /// Proves the 5 lanes (one after another; each uses all cores).
+            pub fn prove(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> StateProof {
+                StateProof {
+                    l0: prove_lane::<BabyBear>(st, &traces[0], 0, p),
+                    l1: prove_lane::<KoalaBear>(st, &traces[1], 1, p),
+                    l2: prove_lane::<Lane3>(st, &traces[2], 2, p),
+                    l3: prove_lane::<Lane4>(st, &traces[3], 3, p),
+                    l4: prove_lane::<Lane5>(st, &traces[4], 4, p),
+                }
+            }
+
+            /// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).
+            pub fn verify(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &StateProof, p: &Params) -> bool {
+                p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize
+                    && st.well_formed(1 << p.log_rows)
+                    && &st.old_root() == old_root
+                    && &st.new_root() == new_root
+                    && verify_lane::<BabyBear>(st, &proof.l0, 0, p)
+                    && verify_lane::<KoalaBear>(st, &proof.l1, 1, p)
+                    && verify_lane::<Lane3>(st, &proof.l2, 2, p)
+                    && verify_lane::<Lane4>(st, &proof.l3, 3, p)
+                    && verify_lane::<Lane5>(st, &proof.l4, 4, p)
+            }
+        }
     };
-    verify_batch(&cfg, &airs, proof, &[vec![], vec![], vec![]], &pd.common).is_ok()
 }
 
-/// Proves the 5 lanes (one after another; each uses all cores).
-pub fn prove(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> StateProof {
-    StateProof {
-        l0: prove_lane::<BabyBear>(st, &traces[0], 0, p),
-        l1: prove_lane::<KoalaBear>(st, &traces[1], 1, p),
-        l2: prove_lane::<Lane3>(st, &traces[2], 2, p),
-        l3: prove_lane::<Lane4>(st, &traces[3], 3, p),
-        l4: prove_lane::<Lane5>(st, &traces[4], 4, p),
-    }
-}
-
-/// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).
-pub fn verify(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &StateProof, p: &Params) -> bool {
-    p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize
-        && st.well_formed(1 << p.log_rows)
-        && &st.old_root() == old_root
-        && &st.new_root() == new_root
-        && verify_lane::<BabyBear>(st, &proof.l0, 0, p)
-        && verify_lane::<KoalaBear>(st, &proof.l1, 1, p)
-        && verify_lane::<Lane3>(st, &proof.l2, 2, p)
-        && verify_lane::<Lane4>(st, &proof.l3, 3, p)
-        && verify_lane::<Lane5>(st, &proof.l4, 4, p)
-}
+backend!(keccak, crate::config);
+backend!(poseidon2_bn254, crate::bn254);
+pub use keccak::{prove, verify, StateProof};
 
 #[cfg(test)]
 mod tests {
+    use super::keccak::verify_lane;
     use super::*;
+    use crate::config::{BabyBear, KoalaBear, Lane3, Lane4, Lane5};
     use ss_rap_v2::state::{build, AccountState, Transfer};
 
     fn case(n_tx: u32, log_rows: u32) -> (StateStatement, [Vec<Vec<u32>>; 5]) {
@@ -374,6 +389,16 @@ mod tests {
         let mut bad = st.clone();
         assert!(bad.lanes[4].pop().is_some());
         assert!(!verify_lane::<Lane5>(&bad, &proof.l4, 4, &P), "dropped tx");
+    }
+
+    #[test]
+    fn poseidon2_bn254_backend_verifies() {
+        let (st, traces) = case(600, 8);
+        let proof = poseidon2_bn254::prove(&st, &traces, &P);
+        assert!(poseidon2_bn254::verify(&st, &st.old_root(), &st.new_root(), &proof, &P));
+        let mut bad = st.clone();
+        bad.lanes[2][0].to ^= 1;
+        assert!(!poseidon2_bn254::verify_lane::<Lane3>(&bad, &proof.l2, 2, &P));
     }
 
     #[test]

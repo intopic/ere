@@ -1,6 +1,6 @@
 //! State AIR (1000 transfers by default) on Plonky3 vs the in-house engine (Blake3 and Poseidon-BN254).
 //! cargo run --release -p ss_rap_p3 --example bench_p3_state [txs] [log_blowup] [queries]
-use ss_rap_p3::state::{prove, verify, Params};
+use ss_rap_p3::state::{poseidon2_bn254, prove, verify, Params};
 use ss_rap_v2::hash::HashMode;
 use ss_rap_v2::stark::StarkParams;
 use ss_rap_v2::state::{self, build, AccountState, Transfer};
@@ -32,6 +32,12 @@ fn main() {
     let ok = verify(&st, &st.old_root(), &st.new_root(), &proof, &p);
     println!("{n} transfers, {k} accounts, 2^{} rows/lane", sp.log_rows);
     println!("  plonky3 (keccak), blowup {} x {queries} queries : prove {pt:>8.2?}  verify {:>8.2?}  ok {ok}", 1 << log_blowup, t0.elapsed());
+    let t0 = Instant::now();
+    let proof = poseidon2_bn254::prove(&st, &traces, &p);
+    let pt = t0.elapsed();
+    let t0 = Instant::now();
+    let ok = poseidon2_bn254::verify(&st, &st.old_root(), &st.new_root(), &proof, &p);
+    println!("  plonky3 (poseidon2-bn254), blowup {} x {queries}: prove {pt:>8.2?}  verify {:>8.2?}  ok {ok}", 1 << log_blowup, t0.elapsed());
     for (name, mode) in [("ours, blake3", HashMode::Blake3), ("ours, poseidon-bn254", HashMode::Poseidon)] {
         let params = StarkParams { log_rows: sp.log_rows, log_blowup: 2, num_queries: 50 };
         let t0 = Instant::now();

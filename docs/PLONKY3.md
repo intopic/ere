@@ -50,3 +50,14 @@ CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" cargo run --rele
 | 20 000 | 250 ms | 1.16 s | 12.3 s |
 
 `CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" cargo run --release -p ss_rap_p3 --example bench_p3_state -- 20000 1 100`
+
+## P4 (në punë): Poseidon2 mbi BN254 për qarkun R8
+
+`p3/src/bn254.rs`: Merkle dhe transcript me Poseidon2-BN254 (t = 3, x^5, 8 + 56 raunde; vlerat e korsisë paketohen
+disa në një element BN254, si në SP1). Konstantet e raundeve janë tonat (blake3, të rigjenerueshme nga qarku);
+prodhimi duhet të kalojë te konstantet e referencës (zkhash RC3).
+
+| Transferet | Plonky3 Poseidon2-BN254, blowup 2 × 100 | Ne, Poseidon-BN254, blowup 4 × 50 |
+|---|---|---|
+| 1 000 | 0.27 s | 0.78 s |
+| 20 000 | 3.3 s | 12.1 s |
