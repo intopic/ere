@@ -67,7 +67,13 @@ pub struct FriFoldAir {
     /// Receive the layer-0 values from the composition AIR in the same stack (R7): row (q, 0)
     /// takes (q, 0, x, f0) and (q, 1, -x, f1) on the `LINK_LAYER0` bus.
     pub link_layer0: bool,
+    /// Send every opened pair, as a FRI-tree leaf, to the leaf hash AIR (R7): leaf id
+    /// `leaf_base + q * rounds + l`.
+    pub link_leaves: bool,
+    pub leaf_base: u32,
 }
+
+const FRI_LEAF_TAG: &[u8] = b"SS-RAP/v2/fri-leaf";
 
 /// Bus tag shared with `composition_air`: (q, slot, x, f) of a layer-0 opening.
 pub const LINK_LAYER0: u32 = 10;
@@ -116,6 +122,13 @@ impl FriFoldAir {
         v.extend_from_slice(&row[AL..AL + 4]);
         v.extend_from_slice(&row[FIN..FIN + 4]);
         v.push(row[XZ]);
+        v
+    }
+
+    /// Words of the FRI-tree leaf of a pair (f0 || f1 as 8 base words).
+    pub fn leaf_words(&self, pair: &[u32], ch: usize) -> Vec<u32> {
+        let mut v = vec![crate::hash::tag_word_ch(FRI_LEAF_TAG, ch)];
+        v.extend_from_slice(pair);
         v
     }
 
@@ -227,11 +240,11 @@ impl Air for FriFoldAir {
         debug_assert_eq!(out.len() - start, NUM_CONSTRAINTS);
     }
     fn num_bus(&self) -> usize {
-        3
+        5
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         if ch != self.lane {
-            out.extend([BusTerm { den: c.beta, weight: 0 }; 3]);
+            out.extend([BusTerm { den: c.beta, weight: 0 }; 5]);
             return;
         }
         let m = RNS_MODULI[ch];
@@ -243,6 +256,13 @@ impl Air for FriFoldAir {
         v1.extend_from_slice(&cur[F1..F1 + 4]);
         out.push(BusTerm { den: c.fingerprint(LINK_LAYER0, &v0, ch), weight: w });
         out.push(BusTerm { den: c.fingerprint(LINK_LAYER0, &v1, ch), weight: w });
+        // the pair as a FRI-tree leaf: [tag, f0, f1] in two chunks
+        let w = if self.link_leaves { sub_mod(0, cur[ACT], m) } else { 0 };
+        let lid = add_mod(add_mod(self.leaf_base % m, mul_mod_channel(cur[Q], self.rounds() as u32, ch), m), cur[L], m);
+        let words = self.leaf_words(&cur[F0..F0 + 8], ch);
+        for (k, chunk) in words.chunks(8).enumerate() {
+            out.push(BusTerm { den: c.fingerprint(crate::leaf_air::TAG_CHUNK, &crate::leaf_air::chunk_tuple(lid, k as u32, chunk), ch), weight: w });
+        }
     }
     fn bus_sum(&self, c: &Challenges, ch: usize) -> Extension4 {
         if ch != self.lane {
@@ -301,6 +321,8 @@ mod tests {
             indices: view.indices,
             final_value: proof.final_layer[j][0],
             link_layer0: false,
+            link_leaves: false,
+            leaf_base: 0,
         };
         let pairs = proof.queries.iter().map(|q| q.iter().map(|o| o.pair[j]).collect()).collect();
         (air, pairs, proof)

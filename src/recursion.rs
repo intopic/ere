@@ -7,6 +7,8 @@
 //!   - R7.2b: composition rows -> leaf hashes -> Merkle paths. Every opened value is hashed into
 //!     its leaf and the leaf is authenticated against the committed root (main, aux, quotient
 //!     trees, at x and at the next row's point). Only the roots and positions stay public.
+//!   - R7.2c: FRI fold rows -> leaf hashes -> Merkle paths: every pair FRI folds is authenticated
+//!     against its layer root.
 
 use crate::composition_air::{self, CompositionAir};
 use crate::fri_air::FriFoldAir;
@@ -32,6 +34,8 @@ pub fn fold_air(proof: &StarkProof, view: &StarkView, params: &StarkParams, j: u
         indices: view.indices.clone(),
         final_value: proof.fri.final_layer[j][0],
         link_layer0: true,
+        link_leaves: true,
+        leaf_base: 0,
     }
 }
 
@@ -78,9 +82,26 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
                 words.push(lw[kind].clone());
             }
         }
+        // FRI layer trees: the fold rows send their pairs as leaves
+        let mut fold = fold_air(proof, view, &params, j);
+        fold.leaf_base = specs.len() as u32;
+        let pairs = fold_pairs(proof, j);
+        let rounds = fold.alphas.len();
+        for (q, &i) in view.indices.iter().enumerate() {
+            for l in 0..rounds {
+                let half = n >> (l + 1);
+                let lid = fold.leaf_base + (q * rounds + l) as u32;
+                let pw: Vec<u32> = pairs[q][l].iter().flat_map(|e| e.c).collect();
+                let w = fold.leaf_words(&pw, j);
+                specs.push(LeafSpec { lid, index: (i % half) as u32, len: w.len() });
+                claims.push(PathClaim { leaf: crate::poseidon2::hash_ch(&w, j), index: (i % half) as u32, depth: half.trailing_zeros(), root: hash_to_words(&proof.fri.layer_roots[l]) });
+                paths.push(proof.fri.queries[q][l].path.iter().map(hash_to_words).collect());
+                words.push(w);
+            }
+        }
         Self {
-            fold: fold_air(proof, view, &params, j),
-            pairs: fold_pairs(proof, j),
+            fold,
+            pairs,
             leaves: LeafHashAir { lane: j, leaves: specs, public_words: None, public_digests: None },
             merkle: MerkleAir { claims, lane: j, link_leaves: true },
             composition,
@@ -191,10 +212,69 @@ mod tests {
         alg.pairs[1][0][0] = alg.pairs[1][0][0].add(&Extension4::ONE.sub(&a_over_x, j).mul(&c, j), j);
         alg.pairs[1][0][1] = alg.pairs[1][0][1].sub(&Extension4::ONE.add(&a_over_x, j).mul(&c, j), j);
         assert!(!outer_ok(&alg), "fold of another layer-0 pair");
-        // ...which the fold table alone accepts: the link is what rejects it.
+        // ...which the fold table alone accepts: the links are what reject it.
+        assert!(fold_alone_ok(&mut alg), "the fold table alone accepts the forged pair");
+    }
+
+    /// Proves the FRI fold table on its own (no links): what a verifier without the
+    /// recursion links would accept.
+    fn fold_alone_ok<A: Air>(alg: &mut LaneAlgebra<A>) -> bool {
         alg.fold.link_layer0 = false;
-        alg.composition.link_fri = false;
-        assert!(outer_ok(&alg), "unlinked tables accept the forged pair");
+        alg.fold.link_leaves = false;
+        let p = StarkParams { log_rows: 8, log_blowup: 2, num_queries: 16 };
+        let j = alg.fold.lane;
+        let traces = alg.fold.traces(&alg.pairs, p.log_rows);
+        let t = || Transcript::with_mode(b"fold-alone", HashMode::Lane(j as u8));
+        let proof = prove_air(&alg.fold, &traces, 1, &p, &mut t());
+        verify_air(&alg.fold, &proof, 1 << p.log_rows, &p, &mut t())
+    }
+
+    #[test]
+    fn fri_layers_must_be_the_committed_ones() {
+        // A cheating prover can build a fold-consistent chain from any layer-0 value down to the
+        // final constant (pick the free slot of each layer, solve it in the last one). Only the
+        // layer trees stop that.
+        let j = 1;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+        let view = view_of(&inner, &proof, j);
+        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let rounds = alg.fold.alphas.len();
+        let rows = alg.fold.traces(&alg.pairs, 8)[j].clone();
+        let (q, d) = (1usize, Extension4::new(1, 2, 3, 4));
+        let half = (crate::RNS_MODULI[j] + 1) / 2;
+        let fold = |p: &[Extension4; 2], a: &Extension4, x: u32| {
+            let ax = a.mul_scalar(crate::mod_inv_single(x, crate::RNS_MODULI[j]), j);
+            p[0].add(&p[1], j).add(&ax.mul(&p[0].sub(&p[1], j), j), j).mul_scalar(half, j)
+        };
+        let mut out = fold(&alg.pairs[q][0], &alg.fold.alphas[0], rows[q * rounds][7]);
+        for l in 1..rounds {
+            let sel = rows[q * rounds + l - 1][3] as usize;
+            let x = rows[q * rounds + l][7];
+            let a = alg.fold.alphas[l];
+            alg.pairs[q][l][sel] = out;
+            if l + 1 < rounds {
+                alg.pairs[q][l][1 - sel] = alg.pairs[q][l][1 - sel].add(&d, j);
+            } else {
+                let ax = a.mul_scalar(crate::mod_inv_single(x, crate::RNS_MODULI[j]), j);
+                let two_out = alg.fold.final_value.add(&alg.fold.final_value, j);
+                let (plus, minus) = (Extension4::ONE.add(&ax, j), Extension4::ONE.sub(&ax, j));
+                alg.pairs[q][l][1 - sel] = if sel == 0 {
+                    two_out.sub(&out.mul(&plus, j), j).mul(&minus.inverse(j), j)
+                } else {
+                    two_out.sub(&out.mul(&minus, j), j).mul(&plus.inverse(j), j)
+                };
+            }
+            out = fold(&alg.pairs[q][l], &a, x);
+        }
+        assert_eq!(out, alg.fold.final_value);
+        // the hasher is given the forged pairs too
+        for l in 0..rounds {
+            let pw: Vec<u32> = alg.pairs[q][l].iter().flat_map(|e| e.c).collect();
+            alg.leaf_words[alg.fold.leaf_base as usize + q * rounds + l] = alg.fold.leaf_words(&pw, j);
+        }
+        assert!(!outer_ok(&alg), "forged FRI chain");
+        assert!(fold_alone_ok(&mut alg), "the forged chain is fold-consistent");
     }
 
     #[test]
