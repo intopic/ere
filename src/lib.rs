@@ -23,6 +23,7 @@ pub mod ntt;
 pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod rns256;
+pub mod sponge_air;
 pub mod stark;
 pub mod state;
 pub mod transcript;

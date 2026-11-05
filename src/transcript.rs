@@ -35,11 +35,13 @@ pub struct Poseidon2Duplex {
     pub state: [u32; crate::poseidon2::WIDTH],
     pending: Vec<u32>,
     out: Vec<u32>,
+    /// Every permutation as (rate block written, full output state): what the sponge AIR proves.
+    pub log: Vec<([u32; 8], [u32; crate::poseidon2::WIDTH])>,
 }
 
 impl Poseidon2Duplex {
     pub fn new(domain: &[u32]) -> Self {
-        let mut d = Self { state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new() };
+        let mut d = Self { state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new(), log: Vec::new() };
         d.absorb(domain);
         d
     }
@@ -48,18 +50,22 @@ impl Poseidon2Duplex {
         self.pending.extend_from_slice(words);
         while self.pending.len() >= 8 {
             let block: Vec<u32> = self.pending.drain(..8).collect();
-            self.state[..8].copy_from_slice(&block);
-            crate::poseidon2::permute(&mut self.state);
+            self.permute_with(&block);
         }
     }
+    fn permute_with(&mut self, block: &[u32]) {
+        self.state[..8].copy_from_slice(block);
+        crate::poseidon2::permute(&mut self.state);
+        self.log.push((block.try_into().unwrap(), self.state));
+    }
+
     pub fn squeeze(&mut self) -> u32 {
         if self.out.is_empty() {
             // pad the pending block with its length marker and permute
             let mut block = std::mem::take(&mut self.pending);
             block.push(1);
             block.resize(8, 0);
-            self.state[..8].copy_from_slice(&block);
-            crate::poseidon2::permute(&mut self.state);
+            self.permute_with(&block);
             self.out = self.state[..8].iter().rev().copied().collect();
         }
         self.out.pop().unwrap()
@@ -106,6 +112,11 @@ impl Transcript {
         });
         let p2 = (mode == HashMode::Poseidon2).then(|| Poseidon2Duplex::new(&poseidon2_message(b"SS-RAP/v2/transcript", label)));
         Self { state: *h.finalize().as_bytes(), counter: 0, sponge, p2 }
+    }
+
+    /// The Poseidon2 duplex, when in that mode (the recursion layer reads its permutation log).
+    pub fn poseidon2_duplex(&self) -> Option<&Poseidon2Duplex> {
+        self.p2.as_ref()
     }
 
     pub fn mode(&self) -> HashMode {
