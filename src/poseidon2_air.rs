@@ -1,9 +1,9 @@
 //! AIR for the Poseidon2-KoalaBear permutation (docs/REKURSIONI.md, R2b): one permutation per
 //! row, in the KoalaBear lane.
 //!
-//! Every S-box y = s^3 gets two columns, sq = s^2 and y = sq * s, so all constraints have
-//! degree 2 (the engine's limit); the linear layers are evaluated inside the constraints, so
-//! they need no columns. Width 1 + 16 + 2 * (8 * 16 + 22) = 317, 300 constraints + 1.
+//! Every S-box gets 4 columns of degree-2 steps (s^2, ... up to s^7, see `run_at_ch`), so all
+//! constraints have degree 2 (the engine's limit); the linear layers are evaluated inside the
+//! constraints, so they need no columns. Width 1 + 16 + 4 * (8 * 16 + 22) = 617.
 //!
 //! Each active row sends (input, output) on a LogUp bus. In this standalone form the verifier
 //! adds the public list of (input, output) pairs, which proves that every listed pair is a
@@ -13,56 +13,80 @@
 //! The other four lanes carry an all-zero trace and only trivial constraints: the permutation
 //! is native to KoalaBear only.
 
-use crate::poseidon2::{external_linear, internal_linear, params, FULL_ROUNDS, PARTIAL_ROUNDS, WIDTH};
+use crate::poseidon2::{external_linear_ch, internal_linear_ch, params_ch, FULL_ROUNDS, PARTIAL_ROUNDS, SBOX_DEGREE, WIDTH};
 use crate::stark::{Air, BusTerm, Challenges, Point};
 use crate::{add_mod, mul_mod_channel, sub_mod, Extension4, RNS_MODULI};
 
 pub const LANE: usize = 1; // KoalaBear
 const SBOXES: usize = FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS;
-pub const COLS: usize = 1 + WIDTH + 2 * SBOXES;
-pub const NUM_CONSTRAINTS: usize = 1 + 2 * SBOXES;
+/// Columns (and constraints) per S-box: enough for x^7 = ((s^2 * s)^2) * s in degree-2 steps.
+pub const PER_SBOX: usize = 4;
+pub const COLS: usize = 1 + WIDTH + PER_SBOX * SBOXES;
+pub const NUM_CONSTRAINTS: usize = 1 + PER_SBOX * SBOXES;
 const TAG: u32 = 3;
 
 /// Columns used by one permutation's S-boxes.
-pub const SBOX_COLS: usize = 2 * SBOXES;
+pub const SBOX_COLS: usize = PER_SBOX * SBOXES;
 /// Constraints of one permutation.
-pub const PERM_CONSTRAINTS: usize = 2 * SBOXES;
+pub const PERM_CONSTRAINTS: usize = PER_SBOX * SBOXES;
 
 /// Runs the permutation on `input` with its S-box columns at `cols[base..base + SBOX_COLS]`,
 /// either filling them (`fill`) or reading them and pushing the constraint values; returns the
 /// output state.
 pub(crate) fn run_at(input: &[u32; WIDTH], cols: &mut [u32], base: usize, fill: bool, out: Option<&mut Vec<u32>>) -> [u32; WIDTH] {
-    let ch = LANE;
+    run_at_ch(input, cols, base, fill, out, LANE)
+}
+
+/// Same, in channel `ch` (S-box x^d with d = SBOX_DEGREE[ch]). Each S-box has 4 columns c0..c3:
+///   d = 3: c0 = s^2, c1 = c0 s (output), c2 = c3 = 0
+///   d = 5: c0 = s^2, c1 = c0^2, c2 = c1 s (output), c3 = 0
+///   d = 7: c0 = s^2, c1 = c0 s, c2 = c1^2, c3 = c2 s (output)
+pub fn run_at_ch(input: &[u32; WIDTH], cols: &mut [u32], base: usize, fill: bool, out: Option<&mut Vec<u32>>, ch: usize) -> [u32; WIDTH] {
     let m = RNS_MODULI[ch];
-    let prm = params();
+    let d = SBOX_DEGREE[ch];
+    let prm = params_ch(ch);
     let mut out = out;
     let mut k = 0usize;
+    let mul = |a: u32, b: u32| mul_mod_channel(a, b, ch);
     let mut sbox = |s: u32, cols: &mut [u32]| -> u32 {
-        let (iq, ic) = (base + 2 * k, base + 1 + 2 * k);
+        let c = base + PER_SBOX * k;
         k += 1;
-        if fill {
-            cols[iq] = mul_mod_channel(s, s, ch);
-            cols[ic] = mul_mod_channel(cols[iq], s, ch);
+        // expected value of each column given the previous ones (as committed)
+        let expect = |cols: &[u32], j: usize| -> u32 {
+            match (d, j) {
+                (_, 0) => mul(s, s),
+                (3, 1) => mul(cols[c], s),
+                (5, 1) => mul(cols[c], cols[c]),
+                (5, 2) => mul(cols[c + 1], s),
+                (7, 1) => mul(cols[c], s),
+                (7, 2) => mul(cols[c + 1], cols[c + 1]),
+                (7, 3) => mul(cols[c + 2], s),
+                _ => 0,
+            }
+        };
+        for j in 0..PER_SBOX {
+            if fill {
+                cols[c + j] = expect(cols, j);
+            }
+            if let Some(o) = out.as_deref_mut() {
+                o.push(sub_mod(cols[c + j], expect(cols, j), m));
+            }
         }
-        if let Some(o) = out.as_deref_mut() {
-            o.push(sub_mod(cols[iq], mul_mod_channel(s, s, ch), m));
-            o.push(sub_mod(cols[ic], mul_mod_channel(cols[iq], s, ch), m));
-        }
-        cols[ic]
+        cols[c + (d as usize - 1) / 2]
     };
     let mut st = *input;
-    external_linear(&mut st);
+    external_linear_ch(&mut st, ch);
     for r in 0..FULL_ROUNDS {
         if r == FULL_ROUNDS / 2 {
             for pr in 0..PARTIAL_ROUNDS {
                 st[0] = sbox(add_mod(st[0], prm.partial_rc[pr], m), cols);
-                internal_linear(&mut st, &prm.diag);
+                internal_linear_ch(&mut st, &prm.diag, ch);
             }
         }
         for i in 0..WIDTH {
             st[i] = sbox(add_mod(st[i], prm.full_rc[r][i], m), cols);
         }
-        external_linear(&mut st);
+        external_linear_ch(&mut st, ch);
     }
     st
 }
@@ -190,6 +214,25 @@ mod tests {
             let mut cons = Vec::new();
             assert_eq!(run(&inp, &mut cols, false, Some(&mut cons)), out);
             assert!(cons.iter().all(|&x| x == 0));
+        }
+    }
+
+    #[test]
+    fn columns_reproduce_the_permutation_in_every_channel() {
+        for ch in 0..crate::DEFAULT_RNS_CHANNELS {
+            let inp: [u32; WIDTH] = std::array::from_fn(|i| (i as u32 + 1) * 1_000_003 % RNS_MODULI[ch]);
+            let mut want = inp;
+            crate::poseidon2::permute_ch(&mut want, ch);
+            let mut cols = vec![0u32; COLS];
+            assert_eq!(run_at_ch(&inp, &mut cols, 1 + WIDTH, true, None, ch), want, "channel {ch}");
+            let mut cons = Vec::new();
+            run_at_ch(&inp, &mut cols.clone(), 1 + WIDTH, false, Some(&mut cons), ch);
+            assert!(cons.iter().all(|&x| x == 0));
+            assert_eq!(cons.len(), PERM_CONSTRAINTS);
+            cols[1 + WIDTH + 4 * 7 + 1] ^= 1;
+            let mut cons = Vec::new();
+            run_at_ch(&inp, &mut cols, 1 + WIDTH, false, Some(&mut cons), ch);
+            assert!(cons.iter().any(|&x| x != 0), "channel {ch}: forged S-box column accepted");
         }
     }
 

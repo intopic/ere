@@ -20,7 +20,13 @@ Rekursioni e zvogëlon atë që duhet të kontrollojë qarku final:
 5. Kontrata L1             e njëjta ndërfaqe: një hyrje publike, i njëjti kontroll pairing
 ```
 
-## Problemi kryesor dhe zgjidhja
+## Vendim: pemë për korsi në rrugën e rekursionit
+
+Në rrugën e rekursionit çdo korsi ka pemët, transcript-in dhe hash-in e vet: Poseidon2 mbi fushën e korsisë
+(S-box x^7 për BabyBear, x^3 për KoalaBear, x^5 për tre të tjerat). Kështu çdo korsi verifikohet tërësisht
+brenda fushës së vet, pa asnjë lidhje ndër-fusha. V-UMT mbetet në rrugën e shpejtë native (Blake3).
+
+## Problemi kryesor dhe zgjidhja (versioni i parë, i zëvendësuar nga vendimi më sipër)
 
 Verifikuesi i (1) bën aritmetikë në 5 fusha të ndryshme (një për korsi). Një AIR mbi fushën F_j e bën
 aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
