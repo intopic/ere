@@ -115,6 +115,11 @@ import {{IGroth16Verifier}} from "./IGroth16Verifier.sol";
 contract Groth16Verifier is IGroth16Verifier {{
     uint256 internal constant R_MOD = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     uint256 internal constant P_MOD = 21888242871839275222246405745257275088696311157297823662689037894645226208583;
+    // Bounded gas for the precompiles (EIP-1108 prices: ecAdd 150, ecMul 6000, pairing 45000 + 34000/pair).
+    // A failing precompile consumes all gas it was given; the caps keep an invalid proof cheap to reject.
+    uint256 internal constant EC_ADD_GAS = 500;
+    uint256 internal constant EC_MUL_GAS = 7000;
+    uint256 internal constant PAIRING_GAS = 200000;
 
     uint256 internal constant ALPHA_X = {ax};
     uint256 internal constant ALPHA_Y = {ay};
@@ -153,12 +158,12 @@ contract Groth16Verifier is IGroth16Verifier {{
         uint256[2] memory k;
         bool ok;
         assembly {{
-            ok := staticcall(gas(), 0x07, mulIn, 0x60, k, 0x40)
+            ok := staticcall(EC_MUL_GAS, 0x07, mulIn, 0x60, k, 0x40)
         }}
         if (!ok) return false;
         uint256[4] memory addIn = [IC0_X, IC0_Y, k[0], k[1]];
         assembly {{
-            ok := staticcall(gas(), 0x06, addIn, 0x80, k, 0x40)
+            ok := staticcall(EC_ADD_GAS, 0x06, addIn, 0x80, k, 0x40)
         }}
         if (!ok) return false;
 
@@ -190,7 +195,7 @@ contract Groth16Verifier is IGroth16Verifier {{
         p[23] = DELTA_Y2;
         uint256[1] memory out;
         assembly {{
-            ok := staticcall(gas(), 0x08, p, 0x300, out, 0x20)
+            ok := staticcall(PAIRING_GAS, 0x08, p, 0x300, out, 0x20)
         }}
         return ok && out[0] == 1;
     }}

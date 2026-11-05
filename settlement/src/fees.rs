@@ -67,7 +67,9 @@ pub struct CostModel {
 impl Default for CostModel {
     fn default() -> Self {
         Self {
-            settle_gas: 240_000,
+            // Measured: Foundry reports 269k inside verifyAndSettleBatchV2 for the first batch
+            // (cold storage writes); + 21k base tx + ~6k calldata. Steady state is ~280k.
+            settle_gas: 280_000,
             gas_price_gwei: 1.0,
             blob_gas: 131_072,
             blob_gas_price_gwei: 0.001,
@@ -159,7 +161,7 @@ mod tests {
 
     #[test]
     fn normal_gas_gives_high_margin() {
-        // 1 gwei, ETH $3000, 240k gas, 4 s on a $2/h GPU: batch cost ~ $0.72, under the PDF's
+        // 1 gwei, ETH $3000, 280k gas, 4 s on a $2/h GPU: batch cost ~ $0.84, under the PDF's
         // conservative $1.60 reserve, so the net margin is above the PDF's 89.3%.
         let e = batch_economics(&pdf_mix(), &FeeSchedule::default(), &CostModel::default());
         assert!(e.cost.total() < 1.60, "cost {}", e.cost.total());

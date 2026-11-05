@@ -42,10 +42,10 @@ Transaksionet ─► Sequencer (soft-finality < 200 ms) ─► Batch 1000 tx ─
 | 5 | STARK: NTT, LDE, kompozimi | ✅ `stark.rs`: provë end-to-end për batch MULMOD uint256 (gjurmë + LogUp në AIR + kuocient + FRI), teste sulmi | Opkode të tjera EVM, Keccak-256 |
 | 6 | FRI | ✅ `fri.rs`: commit, query, V-UMT për shtresë, verifikues, teste sulmi | Më shumë query për ≥ 100 bit |
 | 7 | GPU (CUDA) | ⚠️ kernel i palidhur | Host launcher, NTT batch, V-UMT Blake3 në GPU, benchmark RTX 4090 |
-| 8 | Wrapper Groth16 | ❌ | Verifikuesi STARK si qark BN254 (gnark/SP1), trusted setup real |
-| 9 | Kontrata L1 | ⚠️ kompilohet, VK demo e pasigurt | VK reale, teste Foundry (provë e vlefshme, e falsifikuar, sekuencë, blob), deploy në Sepolia |
-| 10 | Sequencer / aggregator | ❌ | Shërbim minimal që mbledh tx, jep soft-confirm dhe dërgon blob + provë |
-| 11 | Moduli i pagesës | ❌ | Tabela e tarifave (transferim/swap), kostoja reale për batch, marzhi |
+| 8 | Wrapper Groth16 | ⚠️ `settlement/groth16.rs`: Groth16 real (arkworks) + verifikues Solidity i gjeneruar nga VK. Qarku është DEV: lidh hyrjen publike, STARK-u verifikohet nga aggregator-i | Qarku që verifikon STARK-un (verifikues STARK si qark BN254, ose STARK-u në zkVM me Groth16), ceremoni trusted setup |
+| 9 | Kontrata L1 | ✅ verifikues i ndarë (VK reale nga setup), 13 teste Foundry me provë nga Rust, gas i matur ~280k/tx settlement | Deploy në Sepolia (kërkon çelës me ETH testnet) |
+| 10 | Sequencer / aggregator | ✅ `settlement/sequencer.rs` + `pipeline.rs`: konfirmim i butë (p99 ~2 µs në proces), batch, rrënjë të zinxhiruara | Shërbim rrjeti (RPC), nënshkrim i konfirmimeve, sparse Merkle tree |
+| 11 | Moduli i pagesës | ✅ `settlement/fees.rs`: $0.006/$0.025, dysheme kosto × (1 + 20%), gas/blob/prover/agregim | Paymaster me stablecoin |
 | 12 | Benchmark dhe CI | ✅ CI jeshil, `bench_pdf_strategy` | Matje end-to-end: koha e provës, gas, finaliteti, $/tx |
 
 ## 4. Fazat (sipas planit 60-ditor të PDF-së, f.3 §2.4)

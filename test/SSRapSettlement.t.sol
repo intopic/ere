@@ -58,7 +58,16 @@ contract SSRapSettlementTest {
         uint256[2] memory c = F.c();
         c[1] = (c[1] + 1) % P_MOD;
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        uint256 g = gasleft();
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), c);
+        // Invalid point: the pairing precompile fails, but only burns its capped gas.
+        require(g - gasleft() < 400_000, "invalid proof must stay cheap to reject");
+    }
+
+    function test_rejectsValidPointsForWrongStatement() public {
+        // Swap A and C: both are valid curve points, so the pairing runs and returns false.
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        _settle(F.NEW_ROOT, F.BATCH, F.c(), F.b(), F.a());
     }
 
     function test_rejectsProofForAnotherStateRoot() public {

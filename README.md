@@ -50,5 +50,6 @@ cargo test --release
 cargo run --release --example bench_pdf_strategy
 cargo run --release --example bench_stark_mulmod   # provë STARK end-to-end për 1024 MULMOD
 cargo run --release --example bench_rns256
-forge build   # kontrata (kërkon Foundry)
+forge build && forge test -vv --gas-report   # kontratat + 13 teste me provë nga Rust
+cargo run --release -p ss_rap_settlement --example export_fixture   # Faza C end-to-end: 1000 tx → STARK → Groth16 → L1
 ```

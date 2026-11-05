@@ -57,3 +57,18 @@ Secila është e shënuar me fazën ku hyn.
 Prova STARK është e madhe (4.7 MiB) dhe ende në CPU. Për L1 ajo mbështillet në Groth16 (faza C), kështu që në zinxhir
 shkon vetëm një provë e vogël me kosto ~240k gas. Shpejtësia 2.5–4 s për një batch të plotë synohet në fazën B (GPU,
 një kanal për GPU).
+
+## D. Faza C e matur (batch 1, 1000 tx: 526 transferime, 474 swap)
+
+| Matja | Rezultati |
+|---|---|
+| Konfirmim i butë në sequencer | p50 ~0.5 µs, p99 ~2 µs në proces (objektivi < 200 ms; rrjeti shton vonesën e vet) |
+| STARK prove / verify (CPU) | ~1.0 s / ~23 ms |
+| Groth16 prove / verify | ~2 ms / ~3 ms |
+| Gas në L1 për `verifyAndSettleBatchV2` | 269k brenda thirrjes (batch i parë) + 21k bazë + calldata, pra ~280k. PDF-ja synon ~240k. Agregimi i disa batch-eve e ul koston për batch. |
+| Ekonomia me 1 gwei, ETH $3000 | të ardhura $15.01, kosto $0.84, **marzh neto 94.4%** (PDF: 89.3%) |
+| Me gas 60 gwei | dyshemeja aktivizohet, asnjë tx nuk shitet nën kosto (marzh ≥ 16.7%) |
+| Provë e pavlefshme në L1 | refuzohet me kosto të kufizuar gas-i (precompile me gas të kufizuar) |
+
+**Ende jo për mainnet:** setup-i Groth16 ka seed publik dhe qarku është DEV. Ai lidh hyrjen publike, por nuk
+verifikon STARK-un brenda SNARK-ut. Hapi tjetër institucional është qarku i vërtetë i wrapper-it dhe ceremonia.
