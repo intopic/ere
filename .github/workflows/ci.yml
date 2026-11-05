@@ -22,6 +22,10 @@ jobs:
         run: |
           cargo run --release --locked -p ss_rap_settlement --example export_fixture | tee e2e.txt
           git diff --exit-code -- contracts/Groth16Verifier.sol test/SettlementFixture.sol
+      - name: R8 settlement circuit (state STARK verified inside Groth16; writes verifier + fixture)
+        run: |
+          cargo run --release --locked -p ss_rap_settlement --example export_stark_fixture | tee r8.txt
+          git diff --exit-code -- contracts/StarkWrapperVerifier.sol test/StarkSettlementFixture.sol
       - name: PDF strategy benchmark
         run: cargo run --release --locked --example bench_pdf_strategy -- 65536 | tee bench_pdf_strategy.txt
       - name: End-to-end STARK benchmark (5 lanes x 1024 uint256 MULMOD)
@@ -32,6 +36,7 @@ jobs:
         run: |
           {
             echo '## Phase C end-to-end'; echo '```'; cat e2e.txt; echo '```'
+            echo '## R8 settlement circuit'; echo '```'; cat r8.txt; echo '```'
             echo '## bench_pdf_strategy'; echo '```'; cat bench_pdf_strategy.txt; echo '```'
             echo '## bench_stark_mulmod'; echo '```'; cat bench_stark_mulmod.txt; echo '```'
             echo '## bench_rns256'; echo '```'; cat bench_rns256.txt; echo '```'

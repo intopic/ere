@@ -13,19 +13,26 @@
 //!   no overspending, every blob transaction executed once and in order, and that the old and
 //!   new state roots in the header are the roots of the proven tables. Signatures are checked
 //!   by the sequencer; proving them in-circuit (secp256k1, using the MULMOD AIR) comes later.
-//! - The Groth16 circuit is the DEV wrapper (see groth16.rs): it binds the public input; the
-//!   STARK is verified natively here before anything is sent to L1.
+//! - Two Groth16 circuits: the DEV wrapper (groth16.rs) only binds the public input, and the
+//!   STARK is verified natively here; the settlement circuit (`Wrapper::Stark`,
+//!   wrapper/settle_circuit.rs) verifies the state STARK inside the SNARK, for one fixed shape.
 //! - The blob versioned hash is 0x01 || blake3(blob)[1..]. On a real network it is
 //!   0x01 || sha256(KZG commitment)[1..], computed by the node when the blob tx is built.
 
 use crate::fees::{batch_economics, BatchEconomics, CostModel, FeeSchedule};
 use crate::groth16;
-use crate::public_input::{keccak256, BatchHeader};
+use crate::public_input::BatchHeader;
+use crate::wrapper::settle_circuit::{SettleCircuit, SettleShape, LABEL};
+use crate::wrapper::statement_var::StatementShape;
+use ark_groth16::Groth16;
+use ark_snark::SNARK;
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use ss_rap_v2::hash::HashMode;
 use crate::sequencer::SealedBatch;
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::{Proof, ProvingKey, VerifyingKey};
-use ss_rap_v2::stark::StarkProof;
-use ss_rap_v2::state::{self, StateError, StateStatement};
+use ss_rap_v2::state::{self, StateError};
 use ss_rap_v2::transcript::Transcript;
 use std::time::{Duration, Instant};
 
@@ -67,16 +74,17 @@ pub fn blob_versioned_hash(blob: &[u8]) -> [u8; 32] {
 }
 
 /// Binds the public statement and every STARK commitment (trace, aux, quotient, all FRI
-/// layers) into one root.
-pub fn v_umt_root(st: &StateStatement, p: &StarkProof) -> [u8; 32] {
-    let mut v = st.digest().to_vec();
-    v.extend_from_slice(&p.main_root);
-    v.extend_from_slice(&p.aux_root);
-    v.extend_from_slice(&p.q_root);
-    for r in &p.fri.layer_roots {
-        v.extend_from_slice(r);
-    }
-    keccak256(&v)
+/// layers) into one root (Poseidon, so the settlement circuit recomputes it cheaply).
+pub use crate::wrapper::settle_circuit::v_umt_root;
+
+/// Which Groth16 circuit wraps the batch.
+#[derive(Clone, Copy, Debug)]
+pub enum Wrapper {
+    /// DEV circuit: binds the public input only; the STARK is verified natively here.
+    Dev,
+    /// The settlement circuit: verifies the state STARK inside the SNARK. The proving key is for
+    /// this one shape (accounts, transfers per lane, STARK parameters).
+    Stark(SettleShape),
 }
 
 #[derive(Debug)]
@@ -86,6 +94,8 @@ pub enum PipelineError {
     RootMismatch,
     StarkRejected,
     Groth16Rejected,
+    /// The batch does not have the shape the settlement circuit's key was made for.
+    ShapeMismatch,
 }
 
 pub fn settle(
@@ -96,8 +106,28 @@ pub fn settle(
     schedule: &FeeSchedule,
     cost: &CostModel,
 ) -> Result<SettlementPackage, PipelineError> {
+    settle_with(batch, pk, vk, Wrapper::Dev, cfg, schedule, cost)
+}
+
+/// The statement shape and STARK parameters of a batch (what a settlement circuit key fixes).
+pub fn batch_shape(batch: &SealedBatch, cfg: &PipelineConfig) -> Result<SettleShape, PipelineError> {
     let params = state::params(batch.txs.len(), cfg.log_blowup, cfg.num_queries);
-    let label = format!("SS-RAP/v2/batch/{}/{}", cfg.chain_id, batch.batch_number);
+    let (st, _) = state::build(&batch.addrs, &batch.old_states, &batch.transfers(), params.log_rows, true).map_err(PipelineError::InvalidBatch)?;
+    Ok(SettleShape { statement: StatementShape::of(&st, params.log_rows), params })
+}
+
+pub fn settle_with(
+    batch: &SealedBatch,
+    pk: &ProvingKey<Bn254>,
+    vk: &VerifyingKey<Bn254>,
+    wrapper: Wrapper,
+    cfg: &PipelineConfig,
+    schedule: &FeeSchedule,
+    cost: &CostModel,
+) -> Result<SettlementPackage, PipelineError> {
+    let params = state::params(batch.txs.len(), cfg.log_blowup, cfg.num_queries);
+    // One constant label: chain id and batch number are bound through the public input.
+    let transcript = || Transcript::with_mode(LABEL, HashMode::Poseidon);
     let mut timings = Timings::default();
 
     let t0 = Instant::now();
@@ -105,10 +135,10 @@ pub fn settle(
     if st.old_root() != batch.old_state_root || st.new_root() != batch.new_state_root {
         return Err(PipelineError::RootMismatch);
     }
-    let stark_proof = state::prove(&st, &traces, &params, &mut Transcript::new(label.as_bytes()));
+    let stark_proof = state::prove(&st, &traces, &params, &mut transcript());
     timings.stark_prove = t0.elapsed();
     let t0 = Instant::now();
-    let ok = state::verify(&st, &batch.old_state_root, &batch.new_state_root, &stark_proof, &params, &mut Transcript::new(label.as_bytes()));
+    let ok = state::verify(&st, &batch.old_state_root, &batch.new_state_root, &stark_proof, &params, &mut transcript());
     timings.stark_verify = t0.elapsed();
     if !ok {
         return Err(PipelineError::StarkRejected);
@@ -124,7 +154,18 @@ pub fn settle(
     };
     let x = header.public_input();
     let t0 = Instant::now();
-    let proof = groth16::prove(pk, x, batch.batch_number);
+    let proof = match wrapper {
+        Wrapper::Dev => groth16::prove(pk, x, batch.batch_number),
+        Wrapper::Stark(shape) => {
+            let p = &shape.params;
+            if StatementShape::of(&st, params.log_rows) != shape.statement || (p.log_rows, p.log_blowup, p.num_queries) != (params.log_rows, params.log_blowup, params.num_queries) {
+                return Err(PipelineError::ShapeMismatch);
+            }
+            let mut rng = ChaCha20Rng::seed_from_u64(batch.batch_number);
+            let c = SettleCircuit { shape, st: Some(&st), proof: Some(&stark_proof), header: Some(&header) };
+            Groth16::<Bn254>::prove(pk, c, &mut rng).map_err(|_| PipelineError::Groth16Rejected)?
+        }
+    };
     timings.groth16_prove = t0.elapsed();
     let t0 = Instant::now();
     if !groth16::verify(vk, x, &proof) {

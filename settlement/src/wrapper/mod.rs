@@ -17,7 +17,9 @@
 pub mod cost;
 pub mod fp31;
 pub mod fri_var;
+pub mod keccak_var;
 pub mod stark_var;
+pub mod settle_circuit;
 pub mod statement_var;
 pub mod hash_var;
 
