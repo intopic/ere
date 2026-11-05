@@ -1,0 +1,9 @@
+[package]
+name = "ss_rap_v2"
+version = "2.0.0"
+edition = "2021"
+description = "SS-RAP v2.0: Verified Sunzi-STARK Residue Arithmetization Pipeline with Cross-Channel LogUp & Irreducible Quartic Extensions"
+
+[dependencies]
+rayon = "1.10"
+blake3 = "1.5"
