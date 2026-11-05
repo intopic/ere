@@ -12,13 +12,15 @@
 //!   - R7.2d: the transcript runs inside the stack (`transcript_air`): every path's root and the
 //!     final FRI layer are written into the absorbed blocks (`link_air`), and the composition
 //!     and fold tables read alpha, beta, rho, gamma, delta and the FRI alphas from its outputs.
-//!     Public: the inner statement, the transcript's public words, positions, S/N (R7.2f) and
-//!     the query indices (R7.2e).
+//!   - R7.2e: the query indices come from transcript output words (`index_air`): the fold rows'
+//!     selection bits and x_0, and every leaf's position in its tree.
+//!     Public: the inner statement, the transcript's public words and schedule, S/N (R7.2f).
 
 use crate::composition_air::{self, CompositionAir};
 use crate::fri_air::FriFoldAir;
 use crate::hash::hash_to_words;
 use crate::leaf_air::{LeafHashAir, LeafSpec};
+use crate::index_air::IndexAir;
 use crate::link_air::{FinalAir, PidRootAir, TreeRootAir, TreeSpec};
 use crate::transcript::Transcript;
 use crate::transcript_air::TranscriptAir;
@@ -46,6 +48,7 @@ pub fn fold_air(proof: &StarkProof, view: &StarkView, params: &StarkParams, j: u
         link_leaves: true,
         leaf_base: 0,
         chal_links: None,
+        index_links: false,
     }
 }
 
@@ -66,6 +69,9 @@ pub struct LaneAlgebra<'a, A: Air> {
     pub tree_roots: TreeRootAir,
     pub tree_root_values: Vec<Digest>,
     pub final_air: FinalAir,
+    pub index: IndexAir,
+    pub index_words: Vec<u32>,
+    pub mult_word: Vec<[u32; 4]>,
     pub view: StarkView,
 }
 
@@ -176,10 +182,25 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             .filter(|&(k, p, _)| !linked.contains(&(k, p)))
             .collect();
         let transcript = TranscriptAir { lane: j, perms: d.log.len(), public_words };
+        // query indices (R7.2e): the second word of each index squeeze
+        let base = 8 * (5 + rounds);
+        assert_eq!(d.squeezed_at.len(), base + 2 * view.indices.len());
+        let mut mult_word = vec![[0u32; 4]; d.log.len()];
+        let (mut words_at, mut index_words) = (Vec::new(), Vec::new());
+        for q in 0..view.indices.len() {
+            let (k, p) = d.squeezed_at[base + 2 * q + 1];
+            assert_eq!(p % 2, 1);
+            mult_word[k][p / 2] += 1;
+            words_at.push((k as u32, p as u32));
+            index_words.push(d.log[k].1[p]);
+            debug_assert_eq!(d.log[k].1[p] as usize & (n / 2 - 1), view.indices[q]);
+        }
+        fold.index_links = true;
+        let index = IndexAir { lane: j, shift: shift(j), log_n: params.log_rows + params.log_blowup, log_blowup: params.log_blowup, rounds, words_at, fri_base: fold.leaf_base };
         Self {
             fold,
             pairs,
-            leaves: LeafHashAir { lane: j, leaves: specs, public_words: None, public_digests: None },
+            leaves: LeafHashAir { lane: j, leaves: specs, public_words: None, public_digests: None, link_index: true },
             merkle: MerkleAir { claims, lane: j, link_leaves: true, link_roots: true },
             composition,
             opened,
@@ -192,12 +213,15 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             tree_roots: TreeRootAir { trees },
             tree_root_values: tree_roots_v,
             final_air,
+            index,
+            index_words,
+            mult_word,
             view: view.clone(),
         }
     }
 
     pub fn stack(&self) -> Stacked<'_> {
-        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air])
+        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air, &self.index])
     }
 
     /// Smallest stack height that fits every table.
@@ -213,10 +237,11 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             self.fold.traces(&self.pairs, log_rows),
             self.leaves.traces(&self.leaf_words, log_rows),
             self.merkle.traces(&self.paths, log_rows),
-            self.transcript.traces(&self.duplex_log, &self.mult_ext, &vec![[0; 4]; self.duplex_log.len()], log_rows),
+            self.transcript.traces(&self.duplex_log, &self.mult_ext, &self.mult_word, log_rows),
             self.pid_roots.traces(&self.merkle.claims.iter().map(|c| c.root).collect::<Vec<_>>(), self.fold.lane, log_rows),
             self.tree_roots.traces(&self.tree_root_values, self.fold.lane, log_rows),
             self.final_air.traces(&self.fold.final_value, self.fold.lane, log_rows),
+            self.index.traces(&self.index_words, log_rows),
         ];
         self.stack().traces(&parts, log_rows)
     }
@@ -227,6 +252,7 @@ mod tests {
     use super::*;
     use crate::hash::HashMode;
     use crate::stark::{prove_air, prove_air_lanes, verify_air};
+    use crate::stark::Point;
     use crate::transcript::Transcript;
 
     const INNER: StarkParams = StarkParams { log_rows: 8, log_blowup: 2, num_queries: 4 };
@@ -307,6 +333,7 @@ mod tests {
         alg.fold.link_layer0 = false;
         alg.fold.link_leaves = false;
         alg.fold.chal_links = None;
+        alg.fold.index_links = false;
         let p = StarkParams { log_rows: 8, log_blowup: 2, num_queries: 16 };
         let j = alg.fold.lane;
         let traces = alg.fold.traces(&alg.pairs, p.log_rows);
@@ -426,5 +453,52 @@ mod tests {
         // The inner proof under another transcript label: the replay itself fails.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| LaneAlgebra::new(&inner, &proof, INNER, b"other")));
         assert!(r.is_err(), "inner proof accepted under another label");
+    }
+
+    #[test]
+    fn query_positions_must_be_the_transcript_ones() {
+        let j = 0;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+
+        // A different index word than the transcript squeezed (i.e. other query positions).
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.index_words[1] ^= 1 << 4;
+        assert!(!outer_ok(&alg), "index word not from the transcript");
+
+        // The index row read from another transcript position.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.index.words_at.swap(0, 1);
+        assert!(!outer_ok(&alg), "index words swapped between queries");
+
+        // The FRI fold claims a different query index than the transcript gives.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.fold.indices[2] ^= 1 << 6;
+        assert!(!outer_ok(&alg), "fold rows on another index");
+    }
+
+    #[test]
+    fn index_decomposition_must_be_canonical() {
+        // w + m has the same field value as w; its low bits give i + 1 (m = 1 mod 2^K).
+        for j in 0..DEFAULT_RNS_CHANNELS {
+            let m = crate::RNS_MODULI[j];
+            let air = IndexAir { lane: j, shift: shift(j), log_n: 10, log_blowup: 2, rounds: 8, words_at: vec![(0, 1)], fri_base: 12 };
+            let w = 5u32;
+            assert!(w as u64 + (m as u64) < 1 << 31);
+            let t = air.traces(&[w], 8);
+            let mut row = t[j][0].clone();
+            let mut out = Vec::new();
+            air.eval(&row, &row, &Point { first_row: 0, not_last: 1 }, j, &mut out);
+            assert!(out.iter().all(|&x| x == 0), "lane {j}: honest row");
+            let alt = w + m;
+            let width = air.width();
+            let bits_at = width - air.k_bits() - 3 - (31 - (m - 1).trailing_zeros() as usize) - 31;
+            for k in 0..31 {
+                row[bits_at + k] = (alt >> k) & 1;
+            }
+            out.clear();
+            air.eval(&row, &row, &Point { first_row: 0, not_last: 1 }, j, &mut out);
+            assert!(out.iter().any(|&x| x != 0), "lane {j}: non-canonical decomposition accepted");
+        }
     }
 }

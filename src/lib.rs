@@ -19,6 +19,7 @@ pub mod composition_air;
 pub mod fri;
 pub mod fri_air;
 pub mod hash;
+pub mod index_air;
 pub mod leaf_air;
 pub mod link_air;
 pub mod logup;

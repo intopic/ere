@@ -76,6 +76,9 @@ pub struct FriFoldAir {
     /// of transcript permutation `chal_links[l]` (bus `transcript_air::TAG_EXT`) and the final
     /// value comes from `link_air::FinalAir`; neither is public.
     pub chal_links: Option<Vec<u32>>,
+    /// The selection bits and x_0 come from `index_air` (derived from the transcript) instead of
+    /// the public claim.
+    pub index_links: bool,
 }
 
 const FRI_LEAF_TAG: &[u8] = b"SS-RAP/v2/fri-leaf";
@@ -115,7 +118,10 @@ impl FriFoldAir {
     fn tuple(&self, q: usize, l: usize) -> Vec<u32> {
         let last = l + 1 == self.rounds();
         let fin = if last { self.final_value } else { Extension4::ZERO };
-        let mut v = vec![q as u32, l as u32, !last as u32, (l == 0) as u32, self.bit(self.indices[q], l)];
+        let mut v = vec![q as u32, l as u32, !last as u32, (l == 0) as u32];
+        if !self.index_links {
+            v.push(self.bit(self.indices[q], l));
+        }
         match &self.chal_links {
             Some(ks) => v.push(ks[l]),
             None => {
@@ -123,12 +129,17 @@ impl FriFoldAir {
                 v.extend(fin.c);
             }
         }
-        v.push(if l == 0 { self.x0(self.indices[q]) } else { 0 });
+        if !self.index_links {
+            v.push(if l == 0 { self.x0(self.indices[q]) } else { 0 });
+        }
         v
     }
 
     fn row_tuple(&self, row: &[u32]) -> Vec<u32> {
-        let mut v = vec![row[Q], row[L], row[CONT], row[FIRST], row[B]];
+        let mut v = vec![row[Q], row[L], row[CONT], row[FIRST]];
+        if !self.index_links {
+            v.push(row[B]);
+        }
         match &self.chal_links {
             Some(_) => v.push(row[KL]),
             None => {
@@ -136,7 +147,9 @@ impl FriFoldAir {
                 v.extend_from_slice(&row[FIN..FIN + 4]);
             }
         }
-        v.push(row[XZ]);
+        if !self.index_links {
+            v.push(row[XZ]);
+        }
         v
     }
 
@@ -259,11 +272,11 @@ impl Air for FriFoldAir {
         debug_assert_eq!(out.len() - start, NUM_CONSTRAINTS);
     }
     fn num_bus(&self) -> usize {
-        7
+        9
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         if ch != self.lane {
-            out.extend([BusTerm { den: c.beta, weight: 0 }; 7]);
+            out.extend([BusTerm { den: c.beta, weight: 0 }; 9]);
             return;
         }
         let m = RNS_MODULI[ch];
@@ -275,6 +288,9 @@ impl Air for FriFoldAir {
             weight: if on { cur[ACT] } else { 0 },
         });
         out.push(BusTerm { den: c.fingerprint(crate::link_air::TAG_FIN, &cur[FIN..FIN + 4], ch), weight: if on { sub_mod(cur[ACT], cur[CONT], m) } else { 0 } });
+        let ix = self.index_links;
+        out.push(BusTerm { den: c.fingerprint(crate::index_air::TAG_FOLD_BIT, &[cur[Q], cur[L], cur[B]], ch), weight: if ix { cur[ACT] } else { 0 } });
+        out.push(BusTerm { den: c.fingerprint(crate::index_air::TAG_X0, &[cur[Q], cur[XZ]], ch), weight: if ix { cur[FIRST] } else { 0 } });
         let w = if self.link_layer0 { cur[FIRST] } else { 0 };
         let mut v0 = vec![cur[Q], 0, cur[X]];
         v0.extend_from_slice(&cur[F0..F0 + 4]);
@@ -350,6 +366,7 @@ mod tests {
             link_leaves: false,
             leaf_base: 0,
             chal_links: None,
+            index_links: false,
         };
         let pairs = proof.queries.iter().map(|q| q.iter().map(|o| o.pair[j]).collect()).collect();
         (air, pairs, proof)

@@ -29,6 +29,8 @@ pub const NUM_CONSTRAINTS: usize = 3 + PERM_CONSTRAINTS;
 const TAG_CHAIN: u32 = 12;
 /// Bus tag of the chunks a leaf absorbs.
 pub const TAG_CHUNK: u32 = 13;
+/// (leaf id, position in its tree).
+pub const TAG_LEAF_INDEX: u32 = 14;
 
 /// Chunk tuple (leaf id, k, 8 words), zero-padded.
 pub fn chunk_tuple(lid: u32, k: u32, chunk: &[u32]) -> Vec<u32> {
@@ -53,6 +55,8 @@ pub struct LeafHashAir {
     /// digest. In a stack both are `None` and the tuples are linked.
     pub public_words: Option<Vec<Vec<u32>>>,
     pub public_digests: Option<Vec<[u32; 8]>>,
+    /// The positions come from `index_air` (derived from the transcript) instead of being public.
+    pub link_index: bool,
 }
 
 fn start_state(len: usize, ch: usize) -> [u32; WIDTH] {
@@ -67,8 +71,8 @@ fn perm(row: &mut [u32], fill: bool, out: Option<&mut Vec<u32>>, ch: usize) -> [
     run_at_ch(&input, row, SBOX, fill, out, ch)
 }
 
-fn chain_tuple(lid: u32, k: u32, idx: u32, st: &[u32]) -> Vec<u32> {
-    let mut v = vec![lid, k, idx];
+fn chain_tuple(lid: u32, k: u32, st: &[u32]) -> Vec<u32> {
+    let mut v = vec![lid, k];
     v.extend_from_slice(st);
     v
 }
@@ -115,8 +119,9 @@ impl Air for LeafHashAir {
     fn statement(&self) -> Vec<u8> {
         let mut v = b"leaf-hash-v1".to_vec();
         v.extend_from_slice(&(self.lane as u32).to_le_bytes());
+        v.push(self.link_index as u8);
         for l in &self.leaves {
-            for x in [l.lid, l.index, l.len as u32] {
+            for x in [l.lid, if self.link_index { 0 } else { l.index }, l.len as u32] {
                 v.extend_from_slice(&x.to_le_bytes());
             }
         }
@@ -147,21 +152,26 @@ impl Air for LeafHashAir {
         perm(&mut row, false, Some(out), ch);
     }
     fn num_bus(&self) -> usize {
-        4
+        5
     }
     fn bus(&self, c: &[u32], cc: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         let m = RNS_MODULI[ch];
         let mut row = c.to_vec();
         let o = perm(&mut row, false, None, ch);
         let fp = |tag: u32, v: &[u32]| cc.fingerprint(tag, v, ch);
-        out.push(BusTerm { den: fp(TAG_CHAIN, &chain_tuple(c[LID], c[K], c[IDX], &c[SIN..SIN + WIDTH])), weight: c[ACT] });
-        out.push(BusTerm { den: fp(TAG_CHAIN, &chain_tuple(c[LID], add_mod(c[K], 1, m), c[IDX], &o)), weight: sub_mod(c[LAST], c[ACT], m) });
+        out.push(BusTerm { den: fp(TAG_CHAIN, &chain_tuple(c[LID], c[K], &c[SIN..SIN + WIDTH])), weight: c[ACT] });
+        out.push(BusTerm { den: fp(TAG_CHAIN, &chain_tuple(c[LID], add_mod(c[K], 1, m), &o)), weight: sub_mod(c[LAST], c[ACT], m) });
+        // the leaf's position, read on its last row (from `index_air` in a stack)
+        out.push(BusTerm { den: fp(TAG_LEAF_INDEX, &[c[LID], c[IDX]]), weight: c[LAST] });
         out.push(BusTerm { den: fp(TAG_CHUNK, &chunk_tuple(c[LID], c[K], &c[CHUNK..CHUNK + 8])), weight: c[ACT] });
         out.push(BusTerm { den: fp(crate::merkle_air::TAG_PATH, &crate::merkle_air::token_values(c[LID], 0, c[IDX], &o[..8])), weight: sub_mod(0, c[LAST], m) });
     }
     fn bus_sum(&self, cc: &Challenges, ch: usize) -> Extension4 {
         // + start states (+ public chunks) (- public digests)
-        let mut plus: Vec<Extension4> = self.leaves.iter().map(|l| cc.fingerprint(TAG_CHAIN, &chain_tuple(l.lid, 0, l.index, &start_state(l.len, ch)), ch)).collect();
+        let mut plus: Vec<Extension4> = self.leaves.iter().map(|l| cc.fingerprint(TAG_CHAIN, &chain_tuple(l.lid, 0, &start_state(l.len, ch)), ch)).collect();
+        if !self.link_index {
+            plus.extend(self.leaves.iter().map(|l| cc.fingerprint(TAG_LEAF_INDEX, &[l.lid, l.index], ch)));
+        }
         if let Some(words) = &self.public_words {
             for (l, w) in self.leaves.iter().zip(words) {
                 for (k, c) in w.chunks(8).enumerate() {
@@ -195,7 +205,7 @@ mod tests {
         let words: Vec<Vec<u32>> = [1usize, 8, 9, 30, 64].iter().enumerate().map(|(i, &len)| (0..len as u32).map(|k| (k * 97 + i as u32 * 13 + 1) % RNS_MODULI[ch]).collect()).collect();
         let leaves = words.iter().enumerate().map(|(i, w)| LeafSpec { lid: i as u32 * 3 + 1, index: 5 * i as u32, len: w.len() }).collect();
         let digests = words.iter().map(|w| crate::poseidon2::hash_ch(w, ch)).collect();
-        (LeafHashAir { lane: ch, leaves, public_words: Some(words.clone()), public_digests: Some(digests) }, words)
+        (LeafHashAir { lane: ch, leaves, public_words: Some(words.clone()), public_digests: Some(digests), link_index: false }, words)
     }
 
     fn ok(air: &LeafHashAir, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]) -> bool {
