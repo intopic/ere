@@ -3,6 +3,10 @@ pragma solidity ^0.8.26;
 
 /**
  * @title SSRapSettlementVerifierV2
+ * @custom:security DEMO ONLY - DO NOT DEPLOY. The verifying key below uses publicly known scalar
+ *      multiples of the generators (11*G1, 5*G2, 7*G2, 13*G2, ...). Anyone who knows these scalars
+ *      knows the Groth16 trapdoor and can forge proofs for any public input. A real key must come
+ *      from a trusted-setup ceremony over the actual circuit.
  * @notice Kontrata e korrigjuar dhe matematikisht e verifikuar në Ethereum L1 për SS-RAP v2.0.
  * @dev Korrigjon gabimet e v1.0:
  *      1. Të gjitha pikat e çelësit verifikues (ALPHA, BETA, GAMMA, DELTA, IC0, IC1) janë pika

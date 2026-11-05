@@ -9,6 +9,8 @@
 //!    with beta = [11, 3, 5, 11, 5] (proven Quadratic Non-Residues for all 5 primes).
 //! 5. O(N) Montgomery Batch Inversion for FRI Folding & LogUp Denominators (Zero Euclidean while-loops in hot loops).
 
+pub mod rns256;
+
 use blake3::Hasher;
 use rayon::prelude::*;
 
@@ -236,28 +238,19 @@ impl Extension4 {
     /// Multiplication in F_{m_j}[u] / (u^4 - beta_j) using channel-specific QNR beta_j
     #[inline(always)]
     pub fn mul(&self, rhs: &Self, ch: usize) -> Self {
-        let beta = EXTENSION_BETA[ch] as u64;
-        let a = [self.c[0] as u64, self.c[1] as u64, self.c[2] as u64, self.c[3] as u64];
-        let b = [rhs.c[0] as u64, rhs.c[1] as u64, rhs.c[2] as u64, rhs.c[3] as u64];
+        // Every partial product is reduced with branchless Barrett and accumulated with add_mod,
+        // so no `%` / division instruction is executed on the hot path.
+        let m = RNS_MODULI[ch];
+        let bt = EXTENSION_BETA[ch];
+        let p = |i: usize, j: usize| mul_mod_channel(self.c[i], rhs.c[j], ch);
+        let wrap = |x: u32| mul_mod_channel(x, bt, ch);
 
-        // Since a[i], b[j] < 2^31 and beta <= 11, max value is (1 + 3*11)*2^62 = 34 * 2^62 < 2^68.
-        // We reduce intermediate sums with u128 Barrett to avoid any 64-bit overflow!
-        let m = RNS_MODULI[ch] as u128;
-        let mu = BARRETT_MU[ch] as u128;
-        let red128 = |val: u128| -> u32 {
-            let val_lo = (val % m) as u64;
-            let _ = mu;
-            fast_reduce_channel(val_lo, ch)
-        };
+        let t0 = add_mod(p(0, 0), wrap(add_mod(add_mod(p(1, 3), p(2, 2), m), p(3, 1), m)), m);
+        let t1 = add_mod(add_mod(p(0, 1), p(1, 0), m), wrap(add_mod(p(2, 3), p(3, 2), m)), m);
+        let t2 = add_mod(add_mod(add_mod(p(0, 2), p(1, 1), m), p(2, 0), m), wrap(p(3, 3)), m);
+        let t3 = add_mod(add_mod(p(0, 3), p(1, 2), m), add_mod(p(2, 1), p(3, 0), m), m);
 
-        let t0 = (a[0] * b[0]) as u128 + (beta as u128) * ((a[1] * b[3] + a[2] * b[2] + a[3] * b[1]) as u128);
-        let t1 = (a[0] * b[1] + a[1] * b[0]) as u128 + (beta as u128) * ((a[2] * b[3] + a[3] * b[2]) as u128);
-        let t2 = (a[0] * b[2] + a[1] * b[1] + a[2] * b[0]) as u128 + (beta as u128) * ((a[3] * b[3]) as u128);
-        let t3 = (a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]) as u128;
-
-        Self {
-            c: [red128(t0), red128(t1), red128(t2), red128(t3)],
-        }
+        Self { c: [t0, t1, t2, t3] }
     }
 
     /// True multiplicative inverse in F_{m_j}[u] / (u^4 - beta_j) via quadratic tower norm
@@ -371,30 +364,45 @@ impl CarryFreeMulWitnessRow {
         }
     }
 
-    /// Evaluates the exact carry-free AIR constraint in channel `ch`:
-    /// 1) Limb reconstruction constraint: R_ch - sum_{k=0}^7 r_limbs[k] * (256^k mod m_ch) == 0 (mod m_ch)
-    /// 2) Quotient identity constraint:   A_ch * B_ch - Q_ch * (P mod m_ch) - R_ch == 0 (mod m_ch)
-    pub fn evaluate_air_constraints(&self, ch: usize) -> (u32, u32) {
+/// Limb-tie: residue - sum_k limbs[k] * 256^k  (mod m_ch). Zero iff the residue matches the limbs.
+    fn limb_tie(res: u32, limbs: &[u8; 8], ch: usize) -> u32 {
+        let m = RNS_MODULI[ch];
+        let mut recon = 0u32;
+        let mut base = 1u32;
+        for &l in limbs {
+            recon = add_mod(recon, mul_mod_channel(l as u32, base, ch), m);
+            base = mul_mod_channel(base, 256, ch);
+        }
+        sub_mod(res, recon, m)
+    }
+
+    /// Evaluates the carry-free AIR constraints in channel `ch`.
+    /// Returns `[tie_a, tie_b, tie_q, tie_r, mul_identity]`; all must be zero.
+    ///
+    /// SECURITY (fixed in v2.1): v2.0 only tied `r_res` to its limbs. A prover could then pick
+    /// arbitrary `q_res[ch]` per channel to satisfy the multiplication identity for a *false* `r`.
+    /// Every residue vector is now tied to the same range-checked byte limbs, which forces it to be
+    /// the RNS image of one integer < 2^64, and the identity then holds over Z because
+    /// |A*B - Q*P - R| < 2^129 < M.
+    pub fn evaluate_air_constraints(&self, ch: usize) -> [u32; 5] {
         let m = RNS_MODULI[ch];
         let p_mod_m = fast_reduce_channel(GOLDILOCKS_P, ch);
 
-        // 1. Verify R_ch matches canonical byte-limbs (cross-channel tie!)
-        let mut recon_r = 0u32;
-        let mut base = 1u32;
-        for k in 0..8 {
-            let term = mul_mod_channel(self.r_limbs[k] as u32, base, ch);
-            recon_r = add_mod(recon_r, term, m);
-            base = mul_mod_channel(base, 256, ch);
-        }
-        let c_limb_tie = sub_mod(self.r_res[ch], recon_r, m);
-
-        // 2. Verify A_ch * B_ch - Q_ch * P_ch - R_ch == 0 (mod m_ch)
         let lhs = mul_mod_channel(self.a_res[ch], self.b_res[ch], ch);
-        let q_p = mul_mod_channel(self.q_res[ch], p_mod_m, ch);
-        let rhs = add_mod(q_p, self.r_res[ch], m);
-        let c_mul_id = sub_mod(lhs, rhs, m);
+        let rhs = add_mod(mul_mod_channel(self.q_res[ch], p_mod_m, ch), self.r_res[ch], m);
 
-        (c_limb_tie, c_mul_id)
+        [
+            Self::limb_tie(self.a_res[ch], &self.a_limbs, ch),
+            Self::limb_tie(self.b_res[ch], &self.b_limbs, ch),
+            Self::limb_tie(self.q_res[ch], &self.q_limbs, ch),
+            Self::limb_tie(self.r_res[ch], &self.r_limbs, ch),
+            sub_mod(lhs, rhs, m),
+        ]
+    }
+
+    /// True iff every constraint is zero on every channel.
+    pub fn is_satisfied(&self) -> bool {
+        (0..DEFAULT_RNS_CHANNELS).all(|ch| self.evaluate_air_constraints(ch).iter().all(|&c| c == 0))
     }
 }
 
@@ -585,9 +593,7 @@ mod tests {
 
         for ch in 0..DEFAULT_RNS_CHANNELS {
             for row in &rows {
-                let (c1, c2) = row.evaluate_air_constraints(ch);
-                assert_eq!(c1, 0, "Byte-limb tie constraint failed on channel {}", ch);
-                assert_eq!(c2, 0, "Quotient multiplication identity failed on channel {}", ch);
+                assert_eq!(row.evaluate_air_constraints(ch), [0; 5], "constraint failed on channel {}", ch);
             }
             let challenge = Extension4::new(99991, 77773, 55559, 33331);
             assert!(
@@ -596,6 +602,28 @@ mod tests {
                 ch
             );
         }
+    }
+
+    /// Regression for the v2.0 soundness gap: forge a row claiming a wrong remainder by solving
+    /// for q_res per channel. v2.0 accepted it; v2.1 must reject it.
+    #[test]
+    fn test_forged_remainder_is_rejected() {
+        let mut row = CarryFreeMulWitnessRow::generate(1234567890123456789, 987654321098765432);
+        let fake_r: u64 = 7;
+        row.r_limbs = fake_r.to_le_bytes();
+        for ch in 0..DEFAULT_RNS_CHANNELS {
+            let m = RNS_MODULI[ch];
+            row.r_res[ch] = fast_reduce_channel(fake_r, ch);
+            let p_mod_m = fast_reduce_channel(GOLDILOCKS_P, ch);
+            let lhs = mul_mod_channel(row.a_res[ch], row.b_res[ch], ch);
+            let diff = sub_mod(lhs, row.r_res[ch], m);
+            row.q_res[ch] = mul_mod_channel(diff, mod_inv_single(p_mod_m, m), ch);
+            let c = row.evaluate_air_constraints(ch);
+            assert_eq!(c[4], 0, "attack makes the mul identity pass");
+            assert_eq!(c[3], 0, "attack makes the r limb-tie pass");
+            assert_ne!(c[2], 0, "q limb-tie must catch the forged quotient");
+        }
+        assert!(!row.is_satisfied());
     }
 
     #[test]

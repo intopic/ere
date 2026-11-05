@@ -2,6 +2,10 @@
 
 Ky folder përmban **paketën e plotë matematikore, ekonomike dhe inxhinierike të korrigjuar (v2.0)** për **SS-RAP v2.0**.
 
+> ⚠️ **Statusi v2.1 (lexo [`INOVACIONI.md`](INOVACIONI.md)):** numrat në tabelën më poshtë janë **objektiva, jo matje**.
+> Matjet e vërteta tregojnë se RNS-256 jep ~7× vonesë më të ulët me 17 punëtorë paralelë, por ~1.36× më shumë punë totale.
+> Kontrata Solidity përdor një çelës verifikues demonstrues dhe **NUK** duhet vendosur në mainnet.
+
 ---
 
 ## 📊 Krahasimi: Tregu Sot kundrejt SS-RAP v2.0 (Shpejtësia, Vonesa & Çmimi Mesatar për Transaksion)
@@ -24,14 +28,22 @@ Ne nuk aplikojmë çmime artificialisht të lira ("race to the bottom"), por nj�
 
 1. **`SS_RAP_v2_Arkitektura_dhe_Kodi_i_Verifikuar.pdf`** — Dokumenti kryesor PDF që përmban tabelën e mësipërme të çmimeve dhe vonesës, arkitekturën e plotë matematikore v2.0 dhe të gjithë kodin (`Cargo.toml`, `src/lib.rs`, `kernels/ss_rap_v2_barrett.cu`, `contracts/SSRapSettlementVerifierV2.sol`).
 2. **`Cargo.toml` & `Cargo.lock`** — Konfigurimi i paketës Rust (`ss_rap_v2`).
-3. **`src/lib.rs`** — Kodi i plotë funksional në Rust (526 rreshta) bashkë me 4 testet kriptografike unitare.
+3. **`src/lib.rs`** — Kodi bazë në Rust (pipeline 64-bit, 5 kanale) me 5 teste, përfshirë testin e sulmit të rregulluar në v2.1.
 4. **`kernels/ss_rap_v2_barrett.cu`** — Kerneli CUDA për GPU me reduktim Barrett pa pjesëtim (`__umul64hi`) në të 5 kanalet RNS.
 5. **`contracts/SSRapSettlementVerifierV2.sol`** — Kontrata Smart në Solidity 0.8.26 për Ethereum L1 me pika reale mbi kurbën BN254 G1 dhe G2 twist, verifikim `ecMul` (0x07), `ecAdd` (0x06), `ecPairing` (0x08) dhe EIP-4844 `blobhash(0)`.
 
 ---
 
+6. **`src/rns256.rs`** (i ri në v2.1) — shumëzim modular 256-bit pa bartje mbi 17 kanale RNS për secp256k1 dhe BN254, me teste sulmi.
+7. **`examples/bench_rns256.rs`** — krahasim i drejtë RNS-256 kundrejt metodës klasike me limbs.
+8. **`INOVACIONI.md`** — çfarë është e matur, çfarë është hipotezë, dhe çfarë mbetet për t'u bërë.
+
 ## 🚀 Si të Ekzekutohen Testet Kriptografike nga Zhvilluesi
 
 ```bash
-cargo test
+cargo test --release
+```
+
+```bash
+cargo run --release --example bench_rns256
 ```
