@@ -20,6 +20,7 @@ pub mod hash;
 pub mod logup;
 pub mod ntt;
 pub mod poseidon2;
+pub mod poseidon2_air;
 pub mod rns256;
 pub mod stark;
 pub mod state;
