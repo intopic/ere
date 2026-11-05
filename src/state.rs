@@ -153,29 +153,29 @@ impl StateStatement {
 }
 
 // ---- column layout
-const AMT: usize = 0;
-const FROM_OLD: usize = 8;
-const FROM_NEW: usize = 16;
-const TO_OLD: usize = 24;
-const TO_NEW: usize = 32;
-const D1: usize = 40;
-const D2: usize = 42;
-const BYTE_COLS: usize = 44;
-const ACTIVE: usize = 44;
-const T: usize = 45;
-const FROM_ID: usize = 46;
-const TO_ID: usize = 47;
-const NONCE: usize = 48;
-const TR1: usize = 49;
-const TO_NONCE: usize = 50;
-const TR2: usize = 51;
-const CF: usize = 52;
-const CT: usize = 59;
+pub const AMT: usize = 0;
+pub const FROM_OLD: usize = 8;
+pub const FROM_NEW: usize = 16;
+pub const TO_OLD: usize = 24;
+pub const TO_NEW: usize = 32;
+pub const D1: usize = 40;
+pub const D2: usize = 42;
+pub const BYTE_COLS: usize = 44;
+pub const ACTIVE: usize = 44;
+pub const T: usize = 45;
+pub const FROM_ID: usize = 46;
+pub const TO_ID: usize = 47;
+pub const NONCE: usize = 48;
+pub const TR1: usize = 49;
+pub const TO_NONCE: usize = 50;
+pub const TR2: usize = 51;
+pub const CF: usize = 52;
+pub const CT: usize = 59;
 pub const WIDTH: usize = 66;
 pub const CONSTRAINTS: usize = 5 + 2 * (8 + 7);
 
-const TAG_MEM: u32 = 1;
-const TAG_TX: u32 = 2;
+pub const TAG_MEM: u32 = 1;
+pub const TAG_TX: u32 = 2;
 
 fn mem_values(id: u32, nonce: u32, ts: u32, bal: &[u32]) -> [u32; 11] {
     let mut v = [0u32; 11];

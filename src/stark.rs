@@ -146,7 +146,7 @@ pub struct StarkParams {
 }
 
 impl StarkParams {
-    fn fri(&self) -> FriParams {
+    pub fn fri(&self) -> FriParams {
         FriParams { log_degree: self.log_rows, log_blowup: self.log_blowup, num_queries: self.num_queries }
     }
     fn check(&self) {

@@ -17,5 +17,6 @@
 pub mod cost;
 pub mod fp31;
 pub mod fri_var;
+pub mod stark_var;
 pub mod hash_var;
 

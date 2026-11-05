@@ -59,7 +59,10 @@ aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
 | R7.2f | Shuma publike S/N brenda stack-ut (`src/public_sum_air.rs`): një rresht për çdo tuple publik të provës së brendshme (gjendja fillestare, finale, transaksionet), gjurmë e shenjës me Horner nën β, ρ të brendshëm (që vijnë nga transcript-i), inversi dhe shuma vrapuese; rreshti i fundit ia jep S/N rreshtave të kompozimit. Kështu β, ρ dhe S/N nuk janë publike | ✅ |
 | R7.3 | Prova rekursive e një korsie me vetëm deklaratën publike: `strip_private()` fshin sfidat, vlerat e hapura, pozicionet, rrënjët dhe vlerat FRI, dhe prova e jashtme verifikohet vetëm me deklaratën e brendshme + formën. Orari i transcript-it (pozicionet e sfidave, rrënjëve, indekseve) varet vetëm nga forma: dy deklarata të ndryshme me të njëjtën formë japin të njëjtin orar. Teste: gjendje finale/transaksion/peshë tjetër, tuple i hequr, lexues shtesë, β nga permutacion tjetër, deklaratë e brendshme tjetër, të gjitha refuzohen | ✅ |
 | R7 | STARK-u rekursiv: lidhja e AIR-eve (Merkle ↔ hapjet, sponge ↔ sfidat, kompozimi ↔ FRI) me bus, (1) → (2), test me prova të falsifikuara | ⏳ |
-| R8 | Qarku BN254 që verifikon (3) + Groth16 + kontrata, end-to-end në CI | ⏳ |
+| R8 | Vendim (5.11): qarku verifikon **direkt** provën e gjendjes (~8 M kufizime e projektuar) sepse prova rekursive kushton 113–228 M në qark (`wrapper_cost`); R7 mbetet për agregim/kompresim më vonë | ⏳ |
+| R8.1 | Gadget-et BN254 (`settlement/src/wrapper/hash_var.rs`): transcript Poseidon, hash i gjetheve (vlera 31-bit, 8 për element), shtigje Merkle; identike me native, refuzojnë vlerë/pozicion/rrënjë të falsifikuar | ✅ |
+| R8.2 | FRI në qark (`fri_var.rs`) për 5 korsitë: palosje pa inversion 2x·next = x(f0+f1) + α(f0−f1), x_{l+1} = ±x_l², shtresa finale kanonike; refuzon çift, shtresë finale, shteg të falsifikuar | ✅ |
+| R8.3 | Verifikuesi i plotë STARK në qark (`stark_var.rs`) për AIR-in e gjendjes: transcript, 4 hapje × 3 pemë, kompozimi C = Q·(x^N−1) dhe kombinimi FRI në x, −x për çdo korsi, shuma publike S/N nga tuple-t publike. Prova e ndershme kalon; vlerë e hapur, kuocient, deklaratë tjetër refuzohen. Matja (1000 tx, blowup 64): ~1.56 M fikse + ~0.49 M për query → ~9.4 M me 16 query | ✅ |
 
 ## Ndershmëria
 
