@@ -42,8 +42,19 @@ pub struct OpenedRow {
     pub main: Vec<u32>,
     pub main_next: Vec<u32>,
     pub aux: Vec<Extension4>,
-    pub h_next: Extension4,
+    pub aux_next: Vec<Extension4>,
     pub quotient: Extension4,
+    pub quotient_next: Extension4,
+}
+
+/// Leaves of one composition row, in the order of their leaf ids: the three trees at x, then
+/// the three trees at the next row's point.
+pub const LEAVES_PER_ROW: usize = 6;
+const LEAF_TAGS: [&[u8]; 3] = [b"SS-RAP/v2/main", b"SS-RAP/v2/aux", b"SS-RAP/v2/quotient"];
+
+/// Leaf id of (row = 2 q + slot, kind).
+pub fn leaf_id(row: usize, kind: usize) -> usize {
+    LEAVES_PER_ROW * row + kind
 }
 
 pub struct CompositionAir<'a, A: Air> {
@@ -58,6 +69,8 @@ pub struct CompositionAir<'a, A: Air> {
     /// Send (q, slot, x, f) to the FRI fold AIR in the same stack instead of to the public
     /// claim (R7): then x and f need not be public.
     pub link_fri: bool,
+    /// Send every opened leaf, in 8-word chunks, to the leaf hash AIR (R7): `leaf_air`.
+    pub link_leaves: bool,
     lay: Lay,
     table: Vec<u32>,
 }
@@ -83,8 +96,9 @@ struct Lay {
     hm: usize,
     nm: usize,
     ha: usize,
-    nh: usize,
+    na: usize,
     qc: usize,
+    nq: usize,
     chal: usize, // alpha, beta, rho, gamma, delta, s/n: 6 x 4
     bh: Vec<usize>,
     ga: usize,
@@ -119,15 +133,16 @@ impl Lay {
         let hm = take(mc);
         let nm = take(mc);
         let ha = take(4 * ac);
-        let nh = take(4);
+        let na = take(4 * ac);
         let qc = take(4);
+        let nq = take(4);
         let chal = take(24);
         let bh: Vec<usize> = bus_len.iter().map(|&k| take(4 * (k + 1))).collect();
         let nterms = inner.num_constraints() + bytes + 1 + nbus + 1;
         let ga = take(4 * (nterms - 1));
         let da = take(4 * (ac + mc));
         let f = take(4);
-        Self { w, bytes, nbus, mc, ac, log_rows, bus_len, act, qs, x, xp, fr, tacc, hm, nm, ha, nh, qc, chal, bh, ga, nterms, da, f, width: at }
+        Self { w, bytes, nbus, mc, ac, log_rows, bus_len, act, qs, x, xp, fr, tacc, hm, nm, ha, na, qc, nq, chal, bh, ga, nterms, da, f, width: at }
     }
 }
 
@@ -173,7 +188,7 @@ impl<'a, A: Air> CompositionAir<'a, A> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(inner: &'a A, lane: usize, inner_params: StarkParams, chals: Challenges, gamma: Extension4, delta: Extension4, s_over_n: Extension4, claims: Vec<OpeningClaim>) -> Self {
         let lay = Lay::new(inner, &inner_params, lane);
-        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, link_fri: false, lay, table: table_coeffs(lane) }
+        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, link_fri: false, link_leaves: false, lay, table: table_coeffs(lane) }
     }
 
     fn n_lde(&self) -> usize {
@@ -206,6 +221,50 @@ impl<'a, A: Air> CompositionAir<'a, A> {
         let mut v = vec![row[l.qs], row[l.qs + 1], row[l.x]];
         v.extend_from_slice(&row[l.f..l.f + 4]);
         v
+    }
+
+    /// The leaf values of the 6 opened leaves of a row: (kind, tag word + values).
+    fn leaf_values(&self, row: &[u32]) -> [Vec<u32>; LEAVES_PER_ROW] {
+        let l = &self.lay;
+        let ch = self.lane;
+        let with_tag = |kind: usize, vals: &[u32]| -> Vec<u32> {
+            let mut v = vec![crate::hash::tag_word_ch(LEAF_TAGS[kind % 3], ch)];
+            v.extend_from_slice(vals);
+            v
+        };
+        [
+            with_tag(0, &row[l.hm..l.hm + l.mc]),
+            with_tag(1, &row[l.ha..l.ha + 4 * l.ac]),
+            with_tag(2, &row[l.qc..l.qc + 4]),
+            with_tag(3, &row[l.nm..l.nm + l.mc]),
+            with_tag(4, &row[l.na..l.na + 4 * l.ac]),
+            with_tag(5, &row[l.nq..l.nq + 4]),
+        ]
+    }
+
+    /// The 6 leaf word lists of an opened row (what `leaf_values` reads from the trace row).
+    pub fn leaf_words(&self, o: &OpenedRow) -> [Vec<u32>; LEAVES_PER_ROW] {
+        let ch = self.lane;
+        let flat = |v: &[Extension4]| -> Vec<u32> { v.iter().flat_map(|e| e.c).collect() };
+        let vals: [Vec<u32>; LEAVES_PER_ROW] = [o.main.clone(), flat(&o.aux), o.quotient.c.to_vec(), o.main_next.clone(), flat(&o.aux_next), o.quotient_next.c.to_vec()];
+        std::array::from_fn(|kind| {
+            let mut v = vec![crate::hash::tag_word_ch(LEAF_TAGS[kind % 3], ch)];
+            v.extend_from_slice(&vals[kind]);
+            v
+        })
+    }
+
+    /// Number of 8-word chunks of each leaf kind.
+    pub fn leaf_chunks(&self) -> [usize; LEAVES_PER_ROW] {
+        let l = &self.lay;
+        let c = |n: usize| (n + 1).div_ceil(8);
+        [c(l.mc), c(4 * l.ac), c(4), c(l.mc), c(4 * l.ac), c(4)]
+    }
+
+    /// Leaf lengths (tag + values) of each kind.
+    pub fn leaf_lens(&self) -> [usize; LEAVES_PER_ROW] {
+        let l = &self.lay;
+        [l.mc + 1, 4 * l.ac + 1, 5, l.mc + 1, 4 * l.ac + 1, 5]
     }
 
     fn public_layer0(&self, c: &OpeningClaim) -> Vec<u32> {
@@ -254,7 +313,7 @@ impl<'a, A: Air> CompositionAir<'a, A> {
         let main: Vec<u32> = wk.row[l.hm..l.hm + l.mc].to_vec();
         let main_next: Vec<u32> = wk.row[l.nm..l.nm + l.mc].to_vec();
         let aux: Vec<Extension4> = (0..l.ac).map(|k| ext(wk.row, l.ha + 4 * k)).collect();
-        let h_next = ext(wk.row, l.nh);
+        let h_next = ext(wk.row, l.na + 4 * (l.ac - 1));
         let q = ext(wk.row, l.qc);
         let [alpha, beta, rho, gamma, delta, s_over_n] = std::array::from_fn(|k| ext(wk.row, l.chal + 4 * k));
 
@@ -337,8 +396,11 @@ impl<'a, A: Air> CompositionAir<'a, A> {
                 for (k, a) in o.aux.iter().enumerate() {
                     r[l.ha + 4 * k..l.ha + 4 * k + 4].copy_from_slice(&a.c);
                 }
-                r[l.nh..l.nh + 4].copy_from_slice(&o.h_next.c);
+                for (k, a) in o.aux_next.iter().enumerate() {
+                    r[l.na + 4 * k..l.na + 4 * k + 4].copy_from_slice(&a.c);
+                }
                 r[l.qc..l.qc + 4].copy_from_slice(&o.quotient.c);
+                r[l.nq..l.nq + 4].copy_from_slice(&o.quotient_next.c);
                 for (k, e) in [self.chals.alpha, self.chals.beta, self.chals.rho, self.gamma, self.delta, self.s_over_n].iter().enumerate() {
                     r[l.chal + 4 * k..l.chal + 4 * k + 4].copy_from_slice(&e.c);
                 }
@@ -388,7 +450,7 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         self.walk(&mut row, Some(out));
     }
     fn num_bus(&self) -> usize {
-        2
+        2 + self.leaf_chunks().iter().sum::<usize>()
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         let mut t = Vec::with_capacity(2);
@@ -399,6 +461,17 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         let neg = sub_mod(0, cur[self.lay.act], RNS_MODULI[ch]);
         out.push(BusTuple { tag: TAG, values: self.row_tuple(cur), weight: neg });
         out.push(BusTuple { tag: crate::fri_air::LINK_LAYER0, values: self.layer0_tuple(cur), weight: neg });
+        // leaf chunks: (leaf id, chunk index, 8 words), sent to the leaf hash AIR
+        let l = &self.lay;
+        let m = RNS_MODULI[ch];
+        let w = if self.link_leaves { neg } else { 0 };
+        let row_id = add_mod(add_mod(cur[l.qs], cur[l.qs], m), cur[l.qs + 1], m);
+        for (kind, vals) in self.leaf_values(cur).iter().enumerate() {
+            let lid = add_mod(mul_mod_channel(row_id, LEAVES_PER_ROW as u32, ch), kind as u32, m);
+            for (k, chunk) in vals.chunks(8).enumerate() {
+                out.push(BusTuple { tag: crate::leaf_air::TAG_CHUNK, values: crate::leaf_air::chunk_tuple(lid, k as u32, chunk), weight: w });
+            }
+        }
     }
     fn bus_sum(&self, c: &Challenges, ch: usize) -> Extension4 {
         let mut dens: Vec<Extension4> = self.claims.iter().map(|cl| c.fingerprint(TAG, &self.public_tuple(cl), ch)).collect();
@@ -427,8 +500,9 @@ pub fn from_proof<'a, A: Air>(inner: &'a A, proof: &crate::stark::StarkProof, vi
                 main: here.main[j].clone(),
                 main_next: next.main[j].clone(),
                 aux: here.aux[j].clone(),
-                h_next: *next.aux[j].last().unwrap(),
+                aux_next: next.aux[j].clone(),
                 quotient: here.quotient[j],
+                quotient_next: next.quotient[j],
             });
         }
     }
@@ -519,7 +593,8 @@ mod tests {
 
         // A running-sum value of the next row.
         let mut bad = opened.clone();
-        bad[0].h_next = bad[0].h_next.add(&Extension4::ONE, j);
+        let h = bad[0].aux_next.last_mut().unwrap();
+        *h = h.add(&Extension4::ONE, j);
         assert!(!check(&air, &bad), "forged running sum");
 
         // Wrong public claims with the honest witness.

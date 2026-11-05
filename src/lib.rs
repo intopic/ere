@@ -19,6 +19,7 @@ pub mod composition_air;
 pub mod fri;
 pub mod fri_air;
 pub mod hash;
+pub mod leaf_air;
 pub mod logup;
 pub mod multi_air;
 pub mod merkle_air;

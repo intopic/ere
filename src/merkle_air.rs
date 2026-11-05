@@ -39,6 +39,8 @@ const SBOX: usize = 37;
 pub const COLS: usize = SBOX + SBOX_COLS;
 pub const NUM_CONSTRAINTS: usize = 2 + 16 + PERM_CONSTRAINTS;
 const TAG: u32 = 4;
+/// Bus tag of the path tokens (pid, level, index, digest): the leaf hash AIR produces level 0.
+pub const TAG_PATH: u32 = TAG;
 
 /// Native Merkle tree over 8-word digests (power-of-two number of leaves).
 pub struct Tree {
@@ -88,6 +90,16 @@ pub struct MerkleAir {
     pub claims: Vec<PathClaim>,
     /// The field the tree's Poseidon2 runs in (KoalaBear = `LANE` for the unified path).
     pub lane: usize,
+    /// The level-0 tokens come from the leaf hash AIR in the same stack (R7) instead of the
+    /// public leaves; `PathClaim::leaf` is then unused.
+    pub link_leaves: bool,
+}
+
+/// Values of a path token, as the leaf hash AIR must send them.
+pub fn token_values(pid: u32, level: u32, idx: u32, d: &[u32]) -> Vec<u32> {
+    let mut v = vec![pid, level, idx];
+    v.extend_from_slice(d);
+    v
 }
 
 fn token(c: &Challenges, pid: u32, level: u32, d: &[u32], idx: u32, ch: usize) -> Extension4 {
@@ -150,6 +162,7 @@ impl Air for MerkleAir {
     fn statement(&self) -> Vec<u8> {
         let mut v = b"merkle-poseidon2-v2".to_vec();
         v.extend_from_slice(&(self.lane as u32).to_le_bytes());
+        v.push(self.link_leaves as u8);
         for c in &self.claims {
             for x in c.leaf.iter().chain(&c.root).chain([&c.index, &c.depth]) {
                 v.extend_from_slice(&x.to_le_bytes());
@@ -209,7 +222,10 @@ impl Air for MerkleAir {
             dens.push(token(ch_c, pid as u32, cl.depth, &cl.root, 0, ch));
         }
         match crate::logup::batch_inverse_ext4(&dens, ch) {
-            Some(inv) => inv.chunks(2).fold(Extension4::ZERO, |a, p| a.add(&p[0], ch).sub(&p[1], ch)),
+            Some(inv) => inv.chunks(2).fold(Extension4::ZERO, |a, p| {
+                let a = if self.link_leaves { a } else { a.add(&p[0], ch) };
+                a.sub(&p[1], ch)
+            }),
             None => Extension4::ONE,
         }
     }
@@ -241,33 +257,33 @@ mod tests {
     #[test]
     fn honest_paths_verify() {
         let (_, claims, paths) = setup();
-        let air = MerkleAir { claims, lane: LANE };
+        let air = MerkleAir { claims, lane: LANE, link_leaves: false };
         assert!(run(&air, &air.traces(&paths, P.log_rows)));
     }
 
     #[test]
     fn wrong_leaf_root_or_index_is_rejected() {
         let (tree, claims, paths) = setup();
-        let honest = MerkleAir { claims: claims.clone(), lane: LANE };
+        let honest = MerkleAir { claims: claims.clone(), lane: LANE, link_leaves: false };
         let traces = honest.traces(&paths, P.log_rows);
 
         let mut c = claims.clone();
         c[2].leaf[0] ^= 1; // a leaf that is not in the tree
-        assert!(!run(&MerkleAir { claims: c, lane: LANE }, &traces));
+        assert!(!run(&MerkleAir { claims: c, lane: LANE, link_leaves: false }, &traces));
 
         let mut c = claims.clone();
         c[3].root = tree.levels[1][0]; // wrong root
-        assert!(!run(&MerkleAir { claims: c, lane: LANE }, &traces));
+        assert!(!run(&MerkleAir { claims: c, lane: LANE, link_leaves: false }, &traces));
 
         let mut c = claims.clone();
         c[3].index = 43; // the leaf at 42 claimed at 43
-        assert!(!run(&MerkleAir { claims: c, lane: LANE }, &traces));
+        assert!(!run(&MerkleAir { claims: c, lane: LANE, link_leaves: false }, &traces));
     }
 
     #[test]
     fn forged_rows_are_rejected() {
         let (_, claims, paths) = setup();
-        let air = MerkleAir { claims, lane: LANE };
+        let air = MerkleAir { claims, lane: LANE, link_leaves: false };
         let traces = air.traces(&paths, P.log_rows);
         for (row, col) in [(7, SIB + 2), (7, BIT), (13, LEFT), (20, SBOX + 5), (0, IDX_NEXT), (3, LEVEL), (3, PID)] {
             let mut bad = traces.clone();
@@ -277,7 +293,7 @@ mod tests {
         // A forged leaf with a consistent recomputed path still has to reach the public root.
         let mut c = air.claims.clone();
         c[0].leaf = hash(&[999]);
-        let forged = MerkleAir { claims: c, lane: LANE };
+        let forged = MerkleAir { claims: c, lane: LANE, link_leaves: false };
         let mut p = paths.clone();
         p[0] = paths[0].clone();
         assert!(!run(&forged, &forged.traces(&p, P.log_rows)));
@@ -292,13 +308,13 @@ mod tests {
             let idxs = [0u32, 9, 31];
             let claims: Vec<PathClaim> = idxs.iter().map(|&i| PathClaim { leaf: leaves[i as usize], index: i, depth: tree.depth() as u32, root: tree.root() }).collect();
             let paths: Vec<Vec<Digest>> = idxs.iter().map(|&i| tree.path(i as usize)).collect();
-            let air = MerkleAir { claims: claims.clone(), lane: ch };
+            let air = MerkleAir { claims: claims.clone(), lane: ch, link_leaves: false };
             let t = || Transcript::with_mode(b"merkle", HashMode::Lane(ch as u8));
             let proof = prove_air(&air, &air.traces(&paths, P.log_rows), 3, &P, &mut t());
             assert!(verify_air(&air, &proof, usize::MAX, &P, &mut t()), "lane {ch}");
             let mut c = claims;
             c[1].leaf[2] ^= 1;
-            let bad = MerkleAir { claims: c, lane: ch };
+            let bad = MerkleAir { claims: c, lane: ch, link_leaves: false };
             let proof = prove_air(&bad, &air.traces(&paths, P.log_rows), 3, &P, &mut t());
             assert!(!verify_air(&bad, &proof, usize::MAX, &P, &mut t()), "lane {ch}: wrong leaf accepted");
         }

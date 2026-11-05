@@ -52,7 +52,7 @@ impl<'a> Stacked<'a> {
         assert_eq!(parts.len(), self.tables.len());
         let n = 1usize << log_rows;
         std::array::from_fn(|ch| {
-            if parts.iter().all(|p| p[ch].is_empty()) {
+            if parts.iter().any(|p| p[ch].is_empty()) {
                 return Vec::new();
             }
             (0..n)
