@@ -379,6 +379,9 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
     let n = n_rows * blowup;
     start_transcript(t, air, params, rows);
     let mode = t.mode();
+    let prof = std::env::var("SSRAP_PROFILE").is_ok();
+    let mut tp = std::time::Instant::now();
+    let mut lap = |name: &str| { if prof { eprintln!("  {name}: {:?}", tp.elapsed()); } tp = std::time::Instant::now(); };
     let lanes = mode.lanes();
 
     // ---- 1. main trace: AIR columns + byte multiplicities (per lane)
@@ -399,8 +402,10 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols.push(mult);
         cols
     });
-    let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| main_hs[ch].iter().map(|col| coset_lde(col, blowup, ch)).collect());
+    let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| crate::par_map(main_hs[ch].len(), |c| coset_lde(&main_hs[ch][c], blowup, ch)));
+    lap("lde_main");
     let main_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&main_lde, i))));
+    lap("hash_main");
     t.absorb_digest(b"stark/main", &main_tree.root());
     let chals = draw_challenges(t);
 
@@ -445,9 +450,11 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
             h[r + 1] = h[r].add(&step, ch).sub(&cx.s_over_n, ch);
         }
         cols.push(h);
-        cols.iter().map(|col| coset_lde_ext(col, blowup, ch)).collect()
+        crate::par_map(cols.len(), |c| coset_lde_ext(&cols[c], blowup, ch))
     });
+    lap("aux+lde");
     let aux_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/aux", &aux_values(&aux_lde, i))));
+    lap("hash_aux");
     t.absorb_digest(b"stark/aux", &aux_tree.root());
     let gammas = t.challenge_ext4_all(b"stark/gamma");
 
@@ -464,11 +471,13 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         let last = pow(root_of_unity(n_rows, ch), (n_rows - 1) as u64, ch);
         let xs: Vec<u32> = std::iter::successors(Some(g), |&x| Some(mul_mod_channel(x, w, ch))).take(n).collect();
         let x_minus_1_inv = crate::batch_inverse_channel(&xs.iter().map(|&x| sub_mod(x, 1, m)).collect::<Vec<_>>(), ch);
+        let chunk = n.div_ceil(64).max(1);
+        crate::par_map(n.div_ceil(chunk), |part| {
         let (mut main_pt, mut main_nx) = (vec![0u32; l.main_cols()], vec![0u32; l.main_cols()]);
         let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
         let (mut base, mut bus) = (Vec::new(), Vec::new());
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
+        let mut out = Vec::with_capacity(chunk);
+        for i in part * chunk..((part + 1) * chunk).min(n) {
             let nx = (i + blowup) % n;
             for c in 0..l.main_cols() {
                 main_pt[c] = main_lde[ch][c][i];
@@ -486,18 +495,21 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
             out.push(c.mul_scalar(z_inv[i % blowup], ch));
         }
         out
+        })
+        .concat()
     });
+    lap("quotient");
     let q_at = |i: usize| -> [Extension4; DEFAULT_RNS_CHANNELS] { std::array::from_fn(|ch| quotient[ch].get(i).copied().unwrap_or_default()) };
     let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &q_at(i))));
     t.absorb_digest(b"stark/quotient", &q_tree.root());
+    lap("hash_q");
     let deltas = t.challenge_ext4_all(b"stark/delta");
 
     // ---- 4. FRI on the random combination
     let f: Layer = per_lane(lanes, |ch| {
-        let mut main_pt = vec![0u32; l.main_cols()];
-        let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
-        (0..n)
-            .map(|i| {
+        crate::par_map(n, |i| {
+                let mut main_pt = vec![0u32; l.main_cols()];
+                let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
                 for c in 0..l.main_cols() {
                     main_pt[c] = main_lde[ch][c][i];
                 }
@@ -506,11 +518,11 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
                 }
                 fri_combination(&main_pt, &aux_pt, &quotient[ch][i], &deltas[ch], ch)
             })
-            .collect()
     });
     let shifts: [u32; DEFAULT_RNS_CHANNELS] = std::array::from_fn(shift);
     let (fri_proof, indices) = fri::prove_coset(f, &shifts, &params.fri(), t);
 
+    lap("fri");
     // ---- 5. openings
     let open = |pos: usize| Opening {
         main: std::array::from_fn(|ch| main_lde[ch].iter().map(|col| col[pos]).collect()),

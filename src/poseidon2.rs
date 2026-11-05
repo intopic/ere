@@ -162,18 +162,71 @@ pub fn internal_linear(state: &mut [u32; WIDTH], diag: &[u32; WIDTH]) {
 }
 
 pub fn permute_ch(state: &mut [u32; WIDTH], ch: usize) {
-    let m = RNS_MODULI[ch];
     let prm = params_ch(ch);
-    external_linear_ch(state, ch);
+    // one monomorphized copy per field: `% M` with a constant M compiles to multiply-shift
+    match ch {
+        0 => permute_const::<{ RNS_MODULI[0] }, { SBOX_DEGREE[0] }>(state, prm),
+        1 => permute_const::<{ RNS_MODULI[1] }, { SBOX_DEGREE[1] }>(state, prm),
+        2 => permute_const::<{ RNS_MODULI[2] }, { SBOX_DEGREE[2] }>(state, prm),
+        3 => permute_const::<{ RNS_MODULI[3] }, { SBOX_DEGREE[3] }>(state, prm),
+        4 => permute_const::<{ RNS_MODULI[4] }, { SBOX_DEGREE[4] }>(state, prm),
+        _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn sbox_const<const M: u32, const D: u32>(x: u32) -> u32 {
+    let m = M as u64;
+    let x = x as u64;
+    let x2 = x * x % m;
+    (match D {
+        3 => x2 * x % m,
+        5 => (x2 * x2 % m) * x % m,
+        _ => ((x2 * x2 % m) * x2 % m) * x % m,
+    }) as u32
+}
+
+#[inline(always)]
+fn external_const<const M: u32>(state: &mut [u32; WIDTH]) {
+    let m = M as u64;
+    let mut y = [0u64; WIDTH];
+    let mut sums = [0u64; 4];
+    for c in 0..4 {
+        let [a, b, cc, d] = [state[4 * c] as u64, state[4 * c + 1] as u64, state[4 * c + 2] as u64, state[4 * c + 3] as u64];
+        // rows of M4 (entries <= 7): no reduction needed before the sum
+        let r = [5 * a + 7 * b + cc + 3 * d, 4 * a + 6 * b + cc + d, a + 3 * b + 5 * cc + 7 * d, a + b + 4 * cc + 6 * d];
+        for k in 0..4 {
+            y[4 * c + k] = r[k];
+            sums[k] += r[k];
+        }
+    }
+    for i in 0..WIDTH {
+        state[i] = ((y[i] + sums[i % 4]) % m) as u32;
+    }
+}
+
+#[inline(always)]
+fn permute_const<const M: u32, const D: u32>(state: &mut [u32; WIDTH], prm: &Params) {
+    let m = M as u64;
+    external_const::<M>(state);
+    let full = |state: &mut [u32; WIDTH], rc: &[u32; WIDTH]| {
+        for i in 0..WIDTH {
+            state[i] = sbox_const::<M, D>(((state[i] as u64 + rc[i] as u64) % m) as u32);
+        }
+        external_const::<M>(state);
+    };
     for r in 0..FULL_ROUNDS / 2 {
-        full_round(state, &prm.full_rc[r], ch);
+        full(state, &prm.full_rc[r]);
     }
     for r in 0..PARTIAL_ROUNDS {
-        state[0] = sbox_ch(add(state[0], prm.partial_rc[r], m), ch);
-        internal_linear_ch(state, &prm.diag, ch);
+        state[0] = sbox_const::<M, D>(((state[0] as u64 + prm.partial_rc[r] as u64) % m) as u32);
+        let sum: u64 = state.iter().map(|&x| x as u64).sum();
+        for i in 0..WIDTH {
+            state[i] = ((sum + prm.diag[i] as u64 * state[i] as u64) % m) as u32;
+        }
     }
     for r in FULL_ROUNDS / 2..FULL_ROUNDS {
-        full_round(state, &prm.full_rc[r], ch);
+        full(state, &prm.full_rc[r]);
     }
 }
 
