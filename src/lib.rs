@@ -9,7 +9,9 @@
 //!    with beta = [11, 3, 5, 11, 5] (proven Quadratic Non-Residues for all 5 primes).
 //! 5. O(N) Montgomery Batch Inversion for FRI Folding & LogUp Denominators (Zero Euclidean while-loops in hot loops).
 
+pub mod fri;
 pub mod logup;
+pub mod ntt;
 pub mod rns256;
 pub mod transcript;
 pub mod uint256;

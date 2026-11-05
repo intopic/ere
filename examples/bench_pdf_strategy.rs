@@ -9,6 +9,7 @@
 //!  S3  Barrett instead of `%`:     fast_reduce_channel                    vs  u64 % m (div)
 //!  S4  Montgomery batch inversion: 1 inverse + 3(N-1) mul                 vs  N extended-Euclid inverses
 //!  S5  V-UMT:                      1 Merkle tree over 5 channels          vs  5 separate trees
+//!  S6  Full unified FRI (Phase A): prove + verify time and proof size for 5 channels at once
 //!
 //! Numbers are wall-clock on whatever machine runs this (CI runners are noisy); ratios matter,
 //! absolute values do not. Nothing here measures a full prover or a GPU.
@@ -295,5 +296,25 @@ fn main() {
     println!("    roots to commit / auth paths per query : 5 vs 1  ({} vs {} sibling hashes)", 5 * log_n, log_n);
     println!("    time 5 trees / V-UMT                   : {:.2} ms / {:.2} ms  ({})",
         t_sep * 1e3, t_umt * 1e3, ratio(t_sep, t_umt));
+
+    // ------------------------------------------------------------------------------- S6
+    use ss_rap_v2::fri::{self, FriParams};
+    use ss_rap_v2::transcript::Transcript;
+    let params = FriParams { log_degree: n.trailing_zeros() - 2, log_blowup: 2, num_queries: 40 };
+    let coeffs: [Vec<u32>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|c| {
+        (0..1usize << params.log_degree).map(|_| (lcg(&mut seed) % RNS_MODULI[c] as u64) as u32).collect()
+    });
+    let t0 = Instant::now();
+    let proof = fri::prove(&coeffs, &params, &mut Transcript::new(b"bench"));
+    let t_prove = t0.elapsed().as_secs_f64();
+    let t0 = Instant::now();
+    let ok = fri::verify(&proof, &params, &mut Transcript::new(b"bench"));
+    let t_verify = t0.elapsed().as_secs_f64();
+    assert!(ok);
+    println!("S6  Unified FRI, 5 channels together (degree < 2^{}, blowup 4, 40 queries, ~{} bits conjectured)",
+        params.log_degree, params.conjectured_security_bits());
+    println!("    prove (LDE + {} folds + V-UMT per layer) : {:.2} ms", params.log_degree, t_prove * 1e3);
+    println!("    verify                                 : {:.3} ms", t_verify * 1e3);
+    println!("    proof size                             : {:.1} KiB", proof.size_bytes() as f64 / 1024.0);
     println!("\nAll correctness asserts passed.");
 }

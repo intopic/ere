@@ -35,12 +35,12 @@ Transaksionet ─► Sequencer (soft-finality < 200 ms) ─► Batch 1000 tx ─
 
 | # | Komponenti | Gjendja tani (main) | Çfarë duhet për MVP |
 |---|---|---|---|
-| 1 | Aritmetika bazë (Barrett, F⁴, batch inverse) | ✅ e testuar | `limb_tie` me fuqi të parallogaritura (S2 më i shpejtë) |
-| 2 | Kufizimet RNS Q/R (64-bit) | ✅ a,b,q,r të lidhura, testet e sulmit | Zgjerim në `uint256` = 4 limbs 64-bit sipas f.3 (MULMOD, ADDMOD) |
-| 3 | LogUp | ⚠️ kontroll konsistence | Shumësi të angazhuara para α, α nga transcript Fiat-Shamir |
-| 4 | Transcript Fiat-Shamir | ❌ | Blake3 transcript për α dhe sfidat FRI |
-| 5 | STARK: NTT, LDE, kompozimi | ❌ | NTT me ω_{2^24}, LDE, polinomi i kompozimit |
-| 6 | FRI | ⚠️ vetëm palosja | Query, hapje Merkle, verifikues, teste me polinome të rastësishme |
+| 1 | Aritmetika bazë (Barrett, F⁴, batch inverse) | ✅ e testuar, `POW256` i parallogaritur (S2: 4.5× vonesë) | — |
+| 2 | Kufizimet RNS Q/R (64-bit + `uint256`) | ✅ `uint256::MulModRow`: 4 limbs 64-bit × 5 kanale, r < P, teste sulmi | ADDMOD dhe opkodet e tjera të EVM-së |
+| 3 | LogUp | ✅ `logup.rs`: shumësi të angazhuara para α, α për çdo kanal, batch inversion | Lidhja me commitment-in e gjurmës (V-UMT) në STARK |
+| 4 | Transcript Fiat-Shamir | ✅ `transcript.rs` (Blake3) | — |
+| 5 | STARK: NTT, LDE, kompozimi | ⚠️ `ntt.rs`: NTT/LDE gati | Interpolimi i gjurmës, polinomi i kompozimit, lidhja me FRI |
+| 6 | FRI | ✅ `fri.rs`: commit, query, V-UMT për shtresë, verifikues, teste sulmi | Më shumë query për ≥ 100 bit |
 | 7 | GPU (CUDA) | ⚠️ kernel i palidhur | Host launcher, NTT batch, V-UMT Blake3 në GPU, benchmark RTX 4090 |
 | 8 | Wrapper Groth16 | ❌ | Verifikuesi STARK si qark BN254 (gnark/SP1), trusted setup real |
 | 9 | Kontrata L1 | ⚠️ kompilohet, VK demo e pasigurt | VK reale, teste Foundry (provë e vlefshme, e falsifikuar, sekuencë, blob), deploy në Sepolia |
