@@ -16,4 +16,5 @@
 
 pub mod cost;
 pub mod fp31;
+pub mod hash_var;
 
