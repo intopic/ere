@@ -15,35 +15,44 @@ Proverët modernë punojnë në fusha të vogla 31-bit (BabyBear, KoalaBear) sep
 por atëherë çdo shumëzim 256-bit duhet emuluar me ~16×16 copa (limbs) + zinxhir bartjesh (carries).
 Bartjet janë **sekuenciale**: limb-i k pret limb-in k−1. Kjo e bën të vështirë paralelizimin.
 
-## 2. Ideja: bashkimi i tri algoritmeve
+## 2. Strategjia e PDF-së: "mos llogarit, verifiko"
 
-| Algoritmi | Çfarë jep |
-| :--- | :--- |
-| **RNS / Teorema Kineze e Mbetjeve (Sunzi)** | Një numër 256-bit ruhet si 17 mbetje të pavarura modulo 17 numrash të thjeshtë 31-bit. Shumëzimi bëhet **pa bartje**, çdo kanal veç e veç. |
-| **STARK me fusha të vogla + NTT (2-adicitet ≥ 2^20)** | Secili prej 17 kanaleve është fushë e vlefshme për NTT/FRI, pra mund të provohet nga një prover i vetëm 31-bit, i pavarur nga të tjerët. |
-| **LogUp (kërkim-tabele)** | I lidh të 17 kanalet me të njëjtat byte-limbs të kontrolluara në [0,255], gjë që e detyron çdo vektor mbetjesh të jetë imazhi i **një** numri të vetëm < 2^256. |
+PDF-ja (f.1–4) nuk e eliminon shumëzimin. Ajo heq **operacionet e shtrenjta rreth tij**, duke kombinuar disa algoritme:
 
-**Inovacioni i vërtetë:** shumëzimi modular 256-bit ndahet në **17 punë plotësisht të pavarura**,
-pa asnjë komunikim ndërmjet tyre gjatë llogaritjes. Kjo përputhet në mënyrë të përsosur me
-17 GPU, 17 SM-grupe në një GPU, ose 17 makina, dhe ul **vonesën** e provës.
+| Nuk bëjmë | Në vend të saj | PDF |
+| :--- | :--- | :--- |
+| Llogaritje `r = a·b mod p` | **Verifikim**: prover-i jep `q, r` si dëshmitarë, qarku kontrollon vetëm `a·b = q·p + r` | f.1, f.3, f.8 |
+| Zinxhir bartjesh | 5 kanale RNS 31-bit, çdo kanal i pavarur ("pa zinxhirë bartjesh") | f.1, f.3 |
+| Pjesëtim `%` | Barrett me konstante μ (`__umul64hi` në GPU) | f.2, f.4, f.13 |
+| N inversione | Montgomery batch: 1 invers + 3(N−1) shumëzime | f.2, f.6 |
+| Rindërtim CRT | Kanalet lidhen me byte-limbs të përbashkëta + LogUp | f.1, f.4 |
+| 5 commitment-e | V-UMT: 1 pemë Merkle për 5 kanalet | f.9 |
+
+Në v2.1 e zgjerova idenë në 17 kanale për 256-bit (`src/rns256.rs`). Ky ishte vendimi im, jo i PDF-së: PDF-ja përdor
+5 kanale mbi limbs 64-bit. Moduli mbetet si eksperiment, por matja kryesore tani ndjek strategjinë e PDF-së.
 
 ## 3. Çfarë matëm (fakte)
 
-```
-A)  RNS-256, të gjitha kufizimet (17 kanale)    2721 ns/rresht
-A1) RNS-256, vetëm një kanal                     287 ns/rresht
-B)  Metoda klasike 16-bit limbs + bartje        1996 ns/rresht
-```
+`cargo run --release --example bench_pdf_strategy` (n = 65 536, një thread, CPU x86-64 në cloud; GitHub Actions e
+ekzekuton në çdo push). Raportet janë ato që kanë rëndësi, numrat absolutë ndryshojnë nga makina në makinë.
 
-* **Vonesa (latency):** me 17 punëtorë paralelë, secili bën vetëm **0.14×** të punës së metodës klasike,
-  pra rreth **7× më shpejt në kohë-reale** për kontrollin e aritmetikës 256-bit.
-* **Puna totale (kosto/$):** RNS bën **1.36× më shumë** punë gjithsej se metoda klasike, sepse çdo kanal
-  duhet të kontrollojë lidhjen me 32 byte-limbs për 5 operandë.
+| # | Zëvendësimi | Rruga naive | Rruga e PDF-së | Rezultati |
+| :--- | :--- | :--- | :--- | :--- |
+| S1 | Verifiko në vend që të llogaritësh (64-bit mod Goldilocks) | 3.07 ns | 1.22 ns | **2.5× më shpejt** |
+| S3 | Barrett në vend të `%` | 3.00 ns | 1.98 ns | **1.5× më shpejt** |
+| S4 | Batch inversion (N = 65 536) | 89.6 ns/elem | 14.7 ns/elem | **6.1× më shpejt** |
+| S5 | V-UMT kundrejt 5 pemëve | 655 355 hash, 40.3 ms | 131 071 hash, 14.0 ms | **5× më pak hash, 2.9× më shpejt, 5× më pak rrënjë/shtigje** |
+| S2 | Kufizimet RNS pa bartje kundrejt zinxhirit me bartje (16-bit limbs) | thellësi 8, 85 ns/rresht | thellësi 1, 5 kanale të pavarura, 130 ns/kanal, 610 ns gjithsej | **Struktura: 8 → 1 thellësi, 0 kolona bartjesh. Në CPU: më i ngadaltë** |
 
-**Përfundim i ndershëm:** RNS-256 na bën **më të shpejtë, jo më të lirë**. Avantazhi ynë në treg është
-**finaliteti i shpejtë** (prova gati në sekonda kur ka shumë GPU paralele), jo çmimi më i ulët për transaksion.
-Pretendimet në README-në e vjetër për "15×–100× më shpejt" dhe "89% marzh fitimi" **nuk janë të matura**
-dhe i hoqa deri sa të kemi një prover të plotë dhe benchmark GPU.
+**Përfundim i ndershëm:**
+* Katër nga pesë zëvendësimet e PDF-së (S1, S3, S4, S5) janë **të matura dhe japin përfitim real** në CPU.
+* S2, thelbi "pa bartje", e heq zinxhirin sekuencial (thellësia nga 8 në 1), që është ajo që nevojitet për
+  paralelizëm në GPU. Por në CPU, me një thread, kontrolli RNS kushton më shumë se zinxhiri klasik, sepse `limb_tie`
+  rillogarit fuqitë 256^k në çdo thirrje. Përfitimi i S2 mbetet **hipotezë deri në benchmark GPU**.
+* Pretendimet "15×–100×", "2.5–4 s", "−55% thellësi gjurme" dhe "89% marzh" **nuk janë matur** ende. Ato kërkojnë
+  një prover të plotë dhe GPU.
+* Matja e mëparshme "1.36× më shumë punë" krahasonte numrin e shumëzimeve me 17 kanale. Kjo nuk mat strategjinë e
+  PDF-së dhe u hoq.
 
 ## 4. Çfarë rregullova në kod (v2.0 → v2.1)
 

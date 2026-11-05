@@ -3,7 +3,7 @@
 Ky folder përmban **paketën e plotë matematikore, ekonomike dhe inxhinierike të korrigjuar (v2.0)** për **SS-RAP v2.0**.
 
 > ⚠️ **Statusi v2.1 (lexo [`INOVACIONI.md`](INOVACIONI.md)):** numrat në tabelën më poshtë janë **objektiva, jo matje**.
-> Matjet e vërteta tregojnë se RNS-256 jep ~7× vonesë më të ulët me 17 punëtorë paralelë, por ~1.36× më shumë punë totale.
+> Matjet e strategjisë së PDF-së (`bench_pdf_strategy`): verifikimi në vend të llogaritjes 2.5×, Barrett 1.5×, batch inversion 6.1×, V-UMT 5× më pak hash. Përfitimi "pa bartje" kërkon ende benchmark në GPU.
 > Kontrata Solidity përdor një çelës verifikues demonstrues dhe **NUK** duhet vendosur në mainnet.
 
 ---
@@ -36,7 +36,9 @@ Ne nuk aplikojmë çmime artificialisht të lira ("race to the bottom"), por nj�
 
 6. **`src/rns256.rs`** (i ri në v2.1) — shumëzim modular 256-bit pa bartje mbi 17 kanale RNS për secp256k1 dhe BN254, me teste sulmi.
 7. **`examples/bench_rns256.rs`** — krahasim i drejtë RNS-256 kundrejt metodës klasike me limbs.
-8. **`INOVACIONI.md`** — çfarë është e matur, çfarë është hipotezë, dhe çfarë mbetet për t'u bërë.
+8. **`examples/bench_pdf_strategy.rs`** — mat pesë zëvendësimet e strategjisë së PDF-së (verifiko/llogarit, pa bartje, Barrett, batch inversion, V-UMT).
+9. **`.github/workflows/ci.yml`** — GitHub Actions: `cargo test`, të dy benchmark-et dhe kompilimi i kontratës me Foundry.
+10. **`INOVACIONI.md`** — çfarë është e matur, çfarë është hipotezë, dhe çfarë mbetet për t'u bërë.
 
 ## 🚀 Si të Ekzekutohen Testet Kriptografike nga Zhvilluesi
 
@@ -45,5 +47,7 @@ cargo test --release
 ```
 
 ```bash
+cargo run --release --example bench_pdf_strategy
 cargo run --release --example bench_rns256
+forge build   # kontrata (kërkon Foundry)
 ```
