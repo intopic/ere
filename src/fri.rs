@@ -226,10 +226,20 @@ pub fn verify(proof: &FriProof, params: &FriParams, t: &mut Transcript) -> bool 
 
 /// Coset verifier. On success returns the layer-0 query indices.
 pub fn verify_coset(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> Option<Vec<usize>> {
-    verify_inner(proof, shift0, params, t)
+    verify_view(proof, shift0, params, t).map(|v| v.indices)
 }
 
-fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> Option<Vec<usize>> {
+/// What the verifier derived from the transcript: the recursion AIRs take it as their claim.
+#[derive(Clone, Debug)]
+pub struct FriView {
+    /// Layer-0 query indices (position i opens i and i + n/2).
+    pub indices: Vec<usize>,
+    /// Folding challenge of every layer, per lane.
+    pub alphas: Vec<[Extension4; DEFAULT_RNS_CHANNELS]>,
+}
+
+/// Coset verifier that also returns the derived challenges and indices.
+pub fn verify_view(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> Option<FriView> {
     let rounds = params.log_degree as usize;
     let n0 = params.domain_size();
     let blowup = 1usize << params.log_blowup;
@@ -287,7 +297,7 @@ fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: 
             shift = std::array::from_fn(|ch| mul_mod_channel(shift[ch], shift[ch], ch));
         }
     }
-    Some(indices)
+    Some(FriView { indices, alphas })
 }
 
 fn pow(mut b: u32, mut e: u64, ch: usize) -> u32 {

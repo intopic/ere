@@ -48,7 +48,8 @@ aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
 | R4 | AIR i verifikimit të Merkle-s me Poseidon2: një nivel për rresht, nivelet lidhen me bus (fëmijë → prind), pretendimet (gjethe, indeks, rrënjë) publike; teste sulmi | ✅ `src/merkle_air.rs` |
 | R5 | Fiat-Shamir me Poseidon2: `HashMode::Poseidon2` për STARK-un e jashtëm (✅ prova e gjendjes 1000 tx në ~160 ms, kundrejt ~70 ms me Blake3 dhe ~950 ms me Poseidon BN254) + AIR i sponge-it (`src/sponge_air.rs`: një permutim për rresht, zinxhir kapaciteti me bus, blloqet dhe daljet publike; refuzon sfida ose mesazhe të falsifikuara) | ✅ |
 | R6.1 | Motori në mënyrën për korsi: `HashMode::Lane(j)`, transcript-i Poseidon2 mbi F_{m_j}, pemët dhe FRI vetëm me vlerat e korsisë j; `prove_air_lanes`/`verify_air_lanes` (5 prova të pavarura, paralele). Teste: prova e një korsie nuk pranohet si korsi tjetër, ndërrimi i provave dhe vlerat e futura në korsi të huaj refuzohen, falsifikimi në korsinë 3 rrëzon vetëm korsinë 3 | ✅ `src/stark.rs`, `src/fri.rs` |
-| R6.2 | AIR i kontrolleve algjebrike për korsi (kompozimi + palosja FRI) | ⏳ |
+| R6.2a | AIR i palosjes FRI për korsi (`src/fri_air.rs`): një rresht për (query, shtresë), fold = (f0+f1)/2 + α(f0−f1)/(2x) në F_{m_j}, zinxhiri i pikave x_{l+1} = (−1)^{b_l} x_l² nga x_0 = s·ω^i, biti zgjedh vendin në çiftin e shtresës tjetër, shtresa e fundit = konstantja publike. Teste: në të 5 korsitë; refuzohen vlera e falsifikuar, α/indeksi/konstantja e gabuar, zinxhiri i prerë, biti i ndërruar, prova FRI mashtruese | ✅ |
+| R6.2b | AIR i kompozimit për korsi (kufizimet e AIR-it të gjendjes në pikat e query-ve) | ⏳ |
 | R7 | STARK-u rekursiv: (1) → (2), test me prova të falsifikuara | ⏳ |
 | R8 | Qarku BN254 që verifikon (3) + Groth16 + kontrata, end-to-end në CI | ⏳ |
 
