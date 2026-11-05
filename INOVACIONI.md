@@ -80,12 +80,21 @@ ekzekuton në çdo push). Raportet janë ato që kanë rëndësi, numrat absolut
    instruksionet e EVM-it, kompozimi i kufizimeve, pyetjet FRI dhe mbështjellja Groth16.
 4. **`verify_logup_byte_range_channel`** llogarit të dyja anët nga të njëjtat të dhëna, ndaj është kontroll
    konsistence, jo provë. Në prover-in e vërtetë, shumëfishimet duhet të angazhohen (commit) para sfidës alpha.
-5. **Kerneli CUDA** është vetëm dekompozim 64-bit/5 kanale; duhet zgjeruar në 17 kanale dhe testuar në GPU (këtu nuk ka `nvcc`).
+5. **Kerneli CUDA** është vetëm dekompozim 64-bit/5 kanale; duhet lidhur me NTT dhe V-UMT dhe testuar në GPU, sipas fazës B të planit.
 
-## 6. Hapat e ardhshëm (sipas rëndësisë)
+## 6. Hapat e ardhshëm
 
-1. Kerneli CUDA 17-kanalësh për `MulModBatch` + benchmark në GPU të vërtetë (H100/4090).
-2. Zinxhir operacionesh në RNS (p.sh. një shumëzim i plotë pike në secp256k1 = `ecrecover`) për të matur
-   sa zbret kostoja kur mbetjet nuk dekompozohen pas çdo hapi.
-3. Shkrim formal i argumentit të sigurisë për lidhjen ndërmjet fushave.
-4. Trusted setup i vërtetë dhe kontratë verifikuese e gjeneruar nga qarku.
+Ndiqen sipas planit 60-ditor të PDF-së (f.3 §2.4). Plani i detajuar është te [`docs/PLANI_MVP.md`](docs/PLANI_MVP.md).
+
+1. **Faza A (CPU):**
+   - `uint256` me 4 limbs 64-bit × 5 kanale
+   - LogUp real dhe Fiat-Shamir
+   - NTT/LDE dhe FRI i plotë me verifikues
+2. **Faza B (GPU):** kernel CUDA + NTT batch + V-UMT Blake3, me benchmark në RTX 4090.
+3. **Faza C (L1 dhe pagesa):**
+   - wrapper Groth16 me trusted setup real
+   - kontratë në Sepolia
+   - sequencer
+   - moduli i pagesës
+
+Moduli `rns256.rs` (17 kanale) mbetet eksperiment jashtë rrugës kryesore.
