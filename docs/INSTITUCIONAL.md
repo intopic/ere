@@ -52,9 +52,10 @@ Secila është e shënuar me fazën ku hyn.
 | Batch inversion | 5–6× |
 | V-UMT | 5× më pak hash |
 | FRI i plotë, 5 kanale, shkallë < 2^14 | prove ~67 ms, verify ~1.3 ms, provë ~237 KiB |
-| STARK end-to-end, 1024 × MULMOD uint256 (secp256k1), 50 query | prove ~1.1 s në 4 bërthama CPU, verify ~23 ms, provë ~4.7 MiB |
+| STARK end-to-end, 5120 × MULMOD uint256 (secp256k1) në 5 korsi, 50 query | prove ~1.5 s në 4 bërthama CPU, verify ~33 ms, provë ~6.5 MiB |
+| STARK i gjendjes, 1000 transferime në 5 korsi, 50 query | prove ~80 ms, verify ~13 ms, provë ~1.4 MiB |
 
-Prova STARK është e madhe (4.7 MiB) dhe ende në CPU. Për L1 ajo mbështillet në Groth16 (faza C), kështu që në zinxhir
+Prova STARK është e madhe (MiB) dhe ende në CPU. Për L1 ajo mbështillet në Groth16 (faza C), kështu që në zinxhir
 shkon vetëm një provë e vogël me kosto ~240k gas. Shpejtësia 2.5–4 s për një batch të plotë synohet në fazën B (GPU,
 një kanal për GPU).
 
@@ -63,7 +64,7 @@ një kanal për GPU).
 | Matja | Rezultati |
 |---|---|
 | Konfirmim i butë në sequencer | p50 ~0.5 µs, p99 ~2 µs në proces (objektivi < 200 ms; rrjeti shton vonesën e vet) |
-| STARK prove / verify (CPU) | ~1.0 s / ~23 ms |
+| STARK i gjendjes prove / verify (CPU) | ~80 ms / ~13 ms (provon old_state_root → new_state_root) |
 | Groth16 prove / verify | ~2 ms / ~3 ms |
 | Gas në L1 për `verifyAndSettleBatchV2` | 269k brenda thirrjes (batch i parë) + 21k bazë + calldata, pra ~280k. PDF-ja synon ~240k. Agregimi i disa batch-eve e ul koston për batch. |
 | Ekonomia me 1 gwei, ETH $3000 | të ardhura $15.01, kosto $0.84, **marzh neto 94.4%** (PDF: 89.3%) |
@@ -72,3 +73,12 @@ një kanal për GPU).
 
 **Ende jo për mainnet:** setup-i Groth16 ka seed publik dhe qarku është DEV. Ai lidh hyrjen publike, por nuk
 verifikon STARK-un brenda SNARK-ut. Hapi tjetër institucional është qarku i vërtetë i wrapper-it dhe ceremonia.
+
+## E. Rregullim sigurie: kanalet RNS si korsi të pavarura
+
+Gjatë leximit të STARK-ut gjetëm që 5 kanalet bëjnë commit në 5 fusha të ndryshme dhe asgjë nuk i detyron të mbajnë të
+njëjtët numra të plotë. Pra argumenti "kontrollohet mod çdo m_j, pra vlen mbi Z" (CRT) nuk mund të përdoret brenda
+STARK-ut ndërmjet kanaleve. Rregullimi: çdo identitet i AIR-it mbahet nën m_j / 2 (limbs me bajte për MULMOD, bajte dhe
+numra të vegjël për gjendjen), kështu që çdo kanal është i sigurt vetë, dhe 5 kanalet bëhen 5 korsi paralele që provojnë
+secila pjesën e vet të batch-it. Testi `stark::tests::lanes_are_independent_and_each_is_sound` e demonstron. CRT mbetet
+i vlefshëm jashtë STARK-ut (benchmark-et S1–S6).

@@ -73,11 +73,11 @@ ekzekuton në çdo push). Raportet janë ato që kanë rëndësi, numrat absolut
 1. **Kontrata Solidity nuk është e sigurt.** Çelësi verifikues përdor shumëfisha të njohur të gjeneratorit
    (11·G1, 5·G2, 7·G2, 13·G2…). Kushdo që i di këta numra mund të falsifikojë një provë Groth16.
    Duhet një ceremoni e vërtetë (trusted setup) mbi qarkun real.
-2. **Lidhja ndërmjet fushave (cross-field binding) nuk është vërtetuar formalisht.** 17 STARK-e në 17 fusha
-   të ndryshme duhet të provojnë se po përdorin të njëjtat byte-limbs. Ideja (pema e përbashkët Merkle V-UMT +
-   pyetje të përbashkëta FRI) është e arsyeshme, por duhet një provë sigurie me shkrim.
-3. **Nuk kemi ende një prover të plotë.** Kemi kufizimet (AIR), FRI-folding dhe Merkle; mungon AIR-i për
-   instruksionet e EVM-it, kompozimi i kufizimeve, pyetjet FRI dhe mbështjellja Groth16.
+2. **Lidhja ndërmjet fushave (cross-field binding): e zgjidhur duke mos e kërkuar.** Fusha të ndryshme nuk mund
+   të detyrohen të mbajnë të njëjtët numra të plotë brenda STARK-ut. Prandaj çdo identitet i AIR-it mbahet nën m_j / 2
+   dhe çdo kanal është i sigurt vetë; 5 kanalet janë 5 korsi paralele (`docs/INSTITUCIONAL.md`, seksioni E).
+3. **Prover-i:** STARK-u end-to-end ekziston (MULMOD dhe tranzicioni i gjendjes, `state.rs`). Mungojnë
+   nënshkrimet në qark, opkodet e tjera të EVM-it dhe mbështjellja Groth16 që verifikon STARK-un.
 4. **`verify_logup_byte_range_channel`** llogarit të dyja anët nga të njëjtat të dhëna, ndaj është kontroll
    konsistence, jo provë. Në prover-in e vërtetë, shumëfishimet duhet të angazhohen (commit) para sfidës alpha.
 5. **Kerneli CUDA** është vetëm dekompozim 64-bit/5 kanale; duhet lidhur me NTT dhe V-UMT dhe testuar në GPU, sipas fazës B të planit.

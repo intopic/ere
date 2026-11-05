@@ -36,15 +36,15 @@ Transaksionet ─► Sequencer (soft-finality < 200 ms) ─► Batch 1000 tx ─
 | # | Komponenti | Gjendja tani (main) | Çfarë duhet për MVP |
 |---|---|---|---|
 | 1 | Aritmetika bazë (Barrett, F⁴, batch inverse) | ✅ e testuar, `POW256` i parallogaritur (S2: 4.5× vonesë) | — |
-| 2 | Kufizimet RNS Q/R (64-bit + `uint256`) | ✅ `uint256::MulModRow`: 4 limbs 64-bit × 5 kanale, r < P, teste sulmi | ADDMOD dhe opkodet e tjera të EVM-së |
+| 2 | Kufizimet RNS Q/R (64-bit + `uint256`) | ✅ `uint256::MulModRow`: limbs me bajte, çdo identitet < 2^24 < m/2, i sigurt në çdo kanal më vete; r < P; teste sulmi | ADDMOD dhe opkodet e tjera të EVM-së |
 | 3 | LogUp | ✅ `logup.rs` + brenda STARK-ut si AIR (kolona inversesh + shumë vijuese) | — |
 | 4 | Transcript Fiat-Shamir | ✅ `transcript.rs` (Blake3) | — |
-| 5 | STARK: NTT, LDE, kompozimi | ✅ `stark.rs`: provë end-to-end për batch MULMOD uint256 (gjurmë + LogUp në AIR + kuocient + FRI), teste sulmi | Opkode të tjera EVM, Keccak-256 |
+| 5 | STARK: NTT, LDE, kompozimi | ✅ `stark.rs`: motor i përgjithshëm (trait `Air`, LogUp për bajtet + bus-e LogUp), 5 kanalet RNS si 5 korsi paralele. AIR-e: MULMOD uint256 dhe **gjendja** (`state.rs`: balanca, nonce, pa mbishpenzim, çdo tx e blob-it ekzekutohet një herë dhe me radhë, rrënjët old/new) | Nënshkrimet në qark (secp256k1 me AIR-in MULMOD), opkode të tjera EVM, Keccak-256 |
 | 6 | FRI | ✅ `fri.rs`: commit, query, V-UMT për shtresë, verifikues, teste sulmi | Më shumë query për ≥ 100 bit |
 | 7 | GPU (CUDA) | ⚠️ kernel i palidhur | Host launcher, NTT batch, V-UMT Blake3 në GPU, benchmark RTX 4090 |
 | 8 | Wrapper Groth16 | ⚠️ `settlement/groth16.rs`: Groth16 real (arkworks) + verifikues Solidity i gjeneruar nga VK. Qarku është DEV: lidh hyrjen publike, STARK-u verifikohet nga aggregator-i | Qarku që verifikon STARK-un (verifikues STARK si qark BN254, ose STARK-u në zkVM me Groth16), ceremoni trusted setup |
 | 9 | Kontrata L1 | ✅ verifikues i ndarë (VK reale nga setup), 13 teste Foundry me provë nga Rust, gas i matur ~280k/tx settlement | Deploy në Sepolia (kërkon çelës me ETH testnet) |
-| 10 | Sequencer / aggregator | ✅ `settlement/sequencer.rs` + `pipeline.rs`: konfirmim i butë (p99 ~2 µs në proces), batch, rrënjë të zinxhiruara | Shërbim rrjeti (RPC), nënshkrim i konfirmimeve, sparse Merkle tree |
+| 10 | Sequencer / aggregator | ✅ `settlement/sequencer.rs` + `pipeline.rs`: konfirmim i butë (p99 ~3 µs në proces), batch, rrënjë të zinxhiruara; pipeline provon tranzicionin e gjendjes dhe refuzon rrënjë që nuk përputhen me provën | Shërbim rrjeti (RPC), nënshkrim i konfirmimeve, sparse Merkle tree |
 | 11 | Moduli i pagesës | ✅ `settlement/fees.rs`: $0.006/$0.025, dysheme kosto × (1 + 20%), gas/blob/prover/agregim | Paymaster me stablecoin |
 | 12 | Benchmark dhe CI | ✅ CI jeshil, `bench_pdf_strategy` | Matje end-to-end: koha e provës, gas, finaliteti, $/tx |
 

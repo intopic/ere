@@ -1,9 +1,12 @@
 //! Minimal sequencer: validates transactions, applies them immediately and returns a soft
 //! confirmation (PDF goal: < 200 ms in the app), then seals batches for proving and settlement.
 //!
+//! Every sealed batch carries what the state AIR (`ss_rap_v2::state`) needs to prove it: the
+//! address table, the accounts at the start of the batch and the transfers by account index.
+//!
 //! MVP simplifications, each with its production replacement:
-//! - state root = Blake3 over the sorted account table; production uses a sparse Merkle tree so
-//!   that users can get inclusion proofs and the escape hatch can work.
+//! - state root = Blake3 over the sorted non-empty accounts (`state::state_root`); production
+//!   uses a sparse Merkle tree so that users can get inclusion proofs and the escape hatch works.
 //! - soft confirmations are returned in-process; production signs them with the sequencer key
 //!   (HSM) and backs them with a bond (docs/INSTITUCIONAL.md, A.2).
 //! - fees are recorded per transaction in micro-USD; production collects them through a
@@ -11,23 +14,23 @@
 
 use crate::fees::{FeeSchedule, TxKind};
 use crate::public_input::keccak256;
-use std::collections::BTreeMap;
+pub use ss_rap_v2::state::{AccountState, Address};
+use ss_rap_v2::state::{state_root, Transfer, MAX_NONCE};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
-
-pub type Address = [u8; 20];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tx {
     pub from: Address,
     pub to: Address,
-    pub amount: u128,
-    pub nonce: u64,
+    pub amount: u64,
+    pub nonce: u32,
     pub kind: TxKind,
 }
 
 impl Tx {
     pub fn hash(&self) -> [u8; 32] {
-        let mut v = Vec::with_capacity(20 + 20 + 16 + 8 + 1);
+        let mut v = Vec::with_capacity(20 + 20 + 8 + 4 + 1);
         v.extend_from_slice(&self.from);
         v.extend_from_slice(&self.to);
         v.extend_from_slice(&self.amount.to_be_bytes());
@@ -51,8 +54,10 @@ pub struct SoftConfirmation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SeqError {
-    BadNonce { expected: u64, got: u64 },
+    BadNonce { expected: u32, got: u32 },
     InsufficientBalance,
+    BalanceOverflow,
+    NonceExhausted,
     BatchFull,
     SelfTransfer,
 }
@@ -64,6 +69,10 @@ pub struct SealedBatch {
     pub new_state_root: [u8; 32],
     pub txs: Vec<Tx>,
     pub fees_micro_usd: Vec<u64>,
+    /// Sorted addresses of every account that exists or is touched in this batch.
+    pub addrs: Vec<Address>,
+    /// Their state at the start of the batch (empty for accounts created by the batch).
+    pub old_states: Vec<AccountState>,
 }
 
 impl SealedBatch {
@@ -74,16 +83,16 @@ impl SealedBatch {
     pub fn blob_data(&self) -> Vec<u8> {
         self.txs.iter().flat_map(|t| t.hash()).collect()
     }
-}
-
-#[derive(Clone, Debug, Default)]
-struct Account {
-    balance: u128,
-    nonce: u64,
+    /// The transactions as transfers between indices of `addrs`.
+    pub fn transfers(&self) -> Vec<Transfer> {
+        let id = |a: &Address| self.addrs.binary_search(a).expect("address in table") as u32;
+        self.txs.iter().map(|t| Transfer { from: id(&t.from), to: id(&t.to), amount: t.amount, nonce: t.nonce }).collect()
+    }
 }
 
 pub struct Sequencer {
-    accounts: BTreeMap<Address, Account>,
+    accounts: BTreeMap<Address, AccountState>,
+    batch_start: BTreeMap<Address, AccountState>,
     pending: Vec<Tx>,
     pending_fees: Vec<u64>,
     batch_number: u64,
@@ -95,9 +104,10 @@ pub struct Sequencer {
 }
 
 impl Sequencer {
-    pub fn new(genesis: &[(Address, u128)], max_batch: usize, schedule: FeeSchedule) -> Self {
-        let accounts = genesis.iter().map(|(a, b)| (*a, Account { balance: *b, nonce: 0 })).collect();
+    pub fn new(genesis: &[(Address, u64)], max_batch: usize, schedule: FeeSchedule) -> Self {
+        let accounts: BTreeMap<Address, AccountState> = genesis.iter().map(|(a, b)| (*a, AccountState { balance: *b, nonce: 0 })).collect();
         let mut s = Self {
+            batch_start: accounts.clone(),
             accounts,
             pending: Vec::new(),
             pending_fees: Vec::new(),
@@ -112,17 +122,11 @@ impl Sequencer {
     }
 
     pub fn state_root(&self) -> [u8; 32] {
-        let mut h = blake3::Hasher::new();
-        h.update(b"SS-RAP/v2/state");
-        for (addr, acc) in &self.accounts {
-            h.update(addr);
-            h.update(&acc.balance.to_be_bytes());
-            h.update(&acc.nonce.to_be_bytes());
-        }
-        *h.finalize().as_bytes()
+        let (addrs, states): (Vec<Address>, Vec<AccountState>) = self.accounts.iter().map(|(a, s)| (*a, *s)).unzip();
+        state_root(&addrs, &states)
     }
 
-    pub fn balance(&self, a: &Address) -> u128 {
+    pub fn balance(&self, a: &Address) -> u64 {
         self.accounts.get(a).map(|x| x.balance).unwrap_or(0)
     }
 
@@ -146,6 +150,12 @@ impl Sequencer {
         if from.balance < tx.amount {
             return Err(SeqError::InsufficientBalance);
         }
+        if from.nonce + 1 >= MAX_NONCE {
+            return Err(SeqError::NonceExhausted);
+        }
+        if self.balance(&tx.to).checked_add(tx.amount).is_none() {
+            return Err(SeqError::BalanceOverflow);
+        }
         let fee = self.schedule.price(tx.kind, self.cost_per_tx_micro_usd);
         let f = self.accounts.entry(tx.from).or_default();
         f.balance -= tx.amount;
@@ -166,15 +176,23 @@ impl Sequencer {
     /// Close the current batch and start the next one.
     pub fn seal(&mut self) -> SealedBatch {
         let new_root = self.state_root();
+        let txs = std::mem::take(&mut self.pending);
+        let mut addrs: BTreeSet<Address> = self.batch_start.keys().copied().collect();
+        addrs.extend(txs.iter().flat_map(|t| [t.from, t.to]));
+        let addrs: Vec<Address> = addrs.into_iter().collect();
+        let old_states = addrs.iter().map(|a| self.batch_start.get(a).copied().unwrap_or_default()).collect();
         let batch = SealedBatch {
             batch_number: self.batch_number,
             old_state_root: self.batch_start_root,
             new_state_root: new_root,
-            txs: std::mem::take(&mut self.pending),
+            txs,
             fees_micro_usd: std::mem::take(&mut self.pending_fees),
+            addrs,
+            old_states,
         };
         self.batch_number += 1;
         self.batch_start_root = new_root;
+        self.batch_start = self.accounts.clone();
         batch
     }
 }
