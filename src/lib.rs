@@ -20,6 +20,7 @@ pub mod fri;
 pub mod fri_air;
 pub mod hash;
 pub mod logup;
+pub mod multi_air;
 pub mod merkle_air;
 pub mod ntt;
 pub mod poseidon2;

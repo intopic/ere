@@ -47,7 +47,7 @@ const OUT: usize = 28;
 const FIN: usize = 32;
 pub const COLS: usize = 36;
 pub const NUM_CONSTRAINTS: usize = 28;
-const TAG: u32 = 7;
+const TAG: u32 = 8;
 
 /// The public claim: lane j's FRI verifier view.
 #[derive(Clone, Debug)]
