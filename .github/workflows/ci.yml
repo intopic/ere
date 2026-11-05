@@ -24,7 +24,7 @@ jobs:
           git diff --exit-code -- contracts/Groth16Verifier.sol test/SettlementFixture.sol
       - name: PDF strategy benchmark
         run: cargo run --release --locked --example bench_pdf_strategy -- 65536 | tee bench_pdf_strategy.txt
-      - name: End-to-end STARK benchmark (1024 x uint256 MULMOD)
+      - name: End-to-end STARK benchmark (5 lanes x 1024 uint256 MULMOD)
         run: cargo run --release --locked --example bench_stark_mulmod -- 10 | tee bench_stark_mulmod.txt
       - name: RNS-256 benchmark
         run: cargo run --release --locked --example bench_rns256 | tee bench_rns256.txt
