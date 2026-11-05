@@ -217,7 +217,7 @@ pub fn batch_inverse_channel(values: &[u32], ch: usize) -> Vec<u32> {
 }
 
 /// Verified Quartic Extension Field Element: F_{m_j}[u] / (u^4 - beta_j)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Extension4 {
     pub c: [u32; 4],
 }

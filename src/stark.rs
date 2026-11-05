@@ -44,6 +44,11 @@ pub(crate) fn per_channel<T: Send, F: Fn(usize) -> T + Sync + Send>(f: F) -> [T;
     v.try_into().unwrap_or_else(|_| unreachable!())
 }
 
+/// Same for the lanes a proof covers (`HashMode::lanes`); the others get `T::default()`.
+pub(crate) fn per_lane<T: Send + Default, F: Fn(usize) -> T + Sync + Send>(lanes: &[usize], f: F) -> [T; DEFAULT_RNS_CHANNELS] {
+    per_channel(|ch| if lanes.contains(&ch) { f(ch) } else { T::default() })
+}
+
 pub const TABLE: usize = 256;
 
 // ---------------------------------------------------------------------------------------------
@@ -153,7 +158,7 @@ impl StarkProof {
             .iter()
             .flatten()
             .map(|o| {
-                let vals: usize = (0..DEFAULT_RNS_CHANNELS).map(|ch| o.main[ch].len() * 4 + o.aux[ch].len() * 16 + 16).sum();
+                let vals: usize = (0..DEFAULT_RNS_CHANNELS).filter(|&ch| !o.main[ch].is_empty()).map(|ch| o.main[ch].len() * 4 + o.aux[ch].len() * 16 + 16).sum();
                 vals + 32 * (o.main_path.len() + o.aux_path.len() + o.q_path.len())
             })
             .sum();
@@ -318,7 +323,7 @@ pub fn aux_leaf_from(mode: HashMode, o: &Opening) -> Hash {
 }
 
 pub fn q_leaf(mode: HashMode, q: &[Extension4; DEFAULT_RNS_CHANNELS]) -> Hash {
-    hash_leaf(mode, b"SS-RAP/v2/quotient", &q.iter().flat_map(|e| e.c).collect::<Vec<_>>())
+    hash_leaf(mode, b"SS-RAP/v2/quotient", &mode.lanes().iter().flat_map(|&ch| q[ch].c).collect::<Vec<_>>())
 }
 
 fn start_transcript<A: Air>(t: &mut Transcript, air: &A, params: &StarkParams, rows: usize) {
@@ -348,9 +353,11 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
     let blowup = 1usize << params.log_blowup;
     let n = n_rows * blowup;
     start_transcript(t, air, params, rows);
+    let mode = t.mode();
+    let lanes = mode.lanes();
 
     // ---- 1. main trace: AIR columns + byte multiplicities (per lane)
-    let main_hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| {
+    let main_hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
         let trace = &traces[ch];
         assert_eq!(trace.len(), n_rows);
         let m = RNS_MODULI[ch];
@@ -367,14 +374,13 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols.push(mult);
         cols
     });
-    let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| main_hs[ch].iter().map(|col| coset_lde(col, blowup, ch)).collect());
-    let mode = t.mode();
+    let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| main_hs[ch].iter().map(|col| coset_lde(col, blowup, ch)).collect());
     let main_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&main_lde, i))));
     t.absorb_digest(b"stark/main", &main_tree.root());
     let chals = draw_challenges(t);
 
     // ---- 2. aux trace on the trace domain, then LDE
-    let aux_lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| {
+    let aux_lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
         let c = chals[ch];
         let main_h = &main_hs[ch];
         let mut cols: Vec<Vec<Extension4>> = Vec::with_capacity(l.aux_cols());
@@ -421,7 +427,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
     let gammas = t.challenge_ext4_all(b"stark/gamma");
 
     // ---- 3. quotient Q = C / (X^N - 1) on the LDE coset
-    let quotient: Layer = per_channel(|ch| {
+    let quotient: Layer = per_lane(lanes, |ch| {
         let m = RNS_MODULI[ch];
         let cx = lane_ctx(air, chals[ch], gammas[ch], n_rows, ch);
         let w = root_of_unity(n, ch);
@@ -456,12 +462,13 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         }
         out
     });
-    let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &std::array::from_fn(|ch| quotient[ch][i]))));
+    let q_at = |i: usize| -> [Extension4; DEFAULT_RNS_CHANNELS] { std::array::from_fn(|ch| quotient[ch].get(i).copied().unwrap_or_default()) };
+    let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &q_at(i))));
     t.absorb_digest(b"stark/quotient", &q_tree.root());
     let deltas = t.challenge_ext4_all(b"stark/delta");
 
     // ---- 4. FRI on the random combination
-    let f: Layer = per_channel(|ch| {
+    let f: Layer = per_lane(lanes, |ch| {
         let mut main_pt = vec![0u32; l.main_cols()];
         let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
         (0..n)
@@ -481,9 +488,9 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
 
     // ---- 5. openings
     let open = |pos: usize| Opening {
-        main: std::array::from_fn(|ch| (0..l.main_cols()).map(|c| main_lde[ch][c][pos]).collect()),
-        aux: std::array::from_fn(|ch| (0..l.aux_cols()).map(|c| aux_lde[ch][c][pos]).collect()),
-        quotient: std::array::from_fn(|ch| quotient[ch][pos]),
+        main: std::array::from_fn(|ch| main_lde[ch].iter().map(|col| col[pos]).collect()),
+        aux: std::array::from_fn(|ch| aux_lde[ch].iter().map(|col| col[pos]).collect()),
+        quotient: q_at(pos),
         main_path: main_tree.path(pos),
         aux_path: aux_tree.path(pos),
         q_path: q_tree.path(pos),
@@ -518,7 +525,8 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
     let deltas = t.challenge_ext4_all(b"stark/delta");
     let shifts: [u32; DEFAULT_RNS_CHANNELS] = std::array::from_fn(shift);
     let tcs: [Vec<u32>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(table_coeffs);
-    let ctxs: [LaneCtx; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| lane_ctx(air, chals[ch], gammas[ch], n_rows, ch));
+    let lanes = t.mode().lanes();
+    let ctxs: [Option<LaneCtx>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| lanes.contains(&ch).then(|| lane_ctx(air, chals[ch], gammas[ch], n_rows, ch)));
     let Some(indices) = fri::verify_coset(&proof.fri, &shifts, &params.fri(), t) else {
         return false;
     };
@@ -529,7 +537,12 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         let j = i + n / 2;
         let positions = [i, j, (i + blowup) % n, (j + blowup) % n];
         for (o, &pos) in opens.iter().zip(&positions) {
-            let shape_ok = (0..DEFAULT_RNS_CHANNELS).all(|ch| o.main[ch].len() == l.main_cols() && o.aux[ch].len() == l.aux_cols());
+            let shape_ok = (0..DEFAULT_RNS_CHANNELS).all(|ch| {
+                let on = lanes.contains(&ch);
+                o.main[ch].len() == if on { l.main_cols() } else { 0 }
+                    && o.aux[ch].len() == if on { l.aux_cols() } else { 0 }
+                    && (on || o.quotient[ch] == Extension4::ZERO)
+            });
             if !shape_ok
                 || !fri::verify_path(mode, &proof.main_root, main_leaf_from(mode, o), pos, &o.main_path)
                 || !fri::verify_path(mode, &proof.aux_root, aux_leaf_from(mode, o), pos, &o.aux_path)
@@ -540,12 +553,12 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         }
         for slot in 0..2 {
             let (here, next, pos) = (&opens[slot], &opens[slot + 2], positions[slot]);
-            for ch in 0..DEFAULT_RNS_CHANNELS {
+            for &ch in lanes {
                 let m = RNS_MODULI[ch];
                 let x = mul_mod_channel(shift(ch), pow(root_of_unity(n, ch), pos as u64, ch), ch);
                 let tv = table_value(&tcs[ch], x, n_rows, ch);
                 let pt = point(x, n_rows, ch);
-                let c = composition(air, &l, &here.main[ch], &next.main[ch], &here.aux[ch], &next.aux[ch][l.sum()], tv, &pt, &ctxs[ch], ch, &mut base, &mut bus);
+                let c = composition(air, &l, &here.main[ch], &next.main[ch], &here.aux[ch], &next.aux[ch][l.sum()], tv, &pt, ctxs[ch].as_ref().unwrap(), ch, &mut base, &mut bus);
                 let z = sub_mod(pow(x, n_rows as u64, ch), 1, m);
                 if c != here.quotient[ch].mul_scalar(z, ch) {
                     return false;
@@ -558,6 +571,23 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-lane proofs (recursion path, docs/REKURSIONI.md "pemë për korsi")
+// ---------------------------------------------------------------------------------------------
+
+/// Proves every lane as its own STARK (`HashMode::Lane(j)`): lane j's trees, transcript and FRI
+/// use Poseidon2 over F_{m_j}, so the proof of lane j is checked entirely inside F_{m_j}. The 5
+/// proofs are independent and built in parallel; each transcript starts from `label`.
+pub fn prove_air_lanes<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], rows: usize, params: &StarkParams, label: &[u8]) -> [StarkProof; DEFAULT_RNS_CHANNELS] {
+    per_channel(|j| prove_air(air, traces, rows, params, &mut Transcript::with_mode(label, HashMode::Lane(j as u8))))
+}
+
+/// Verifies the 5 per-lane proofs; every lane must accept and they must claim the same row count.
+pub fn verify_air_lanes<A: Air>(air: &A, proofs: &[StarkProof; DEFAULT_RNS_CHANNELS], max_rows: usize, params: &StarkParams, label: &[u8]) -> bool {
+    proofs.iter().all(|p| p.rows == proofs[0].rows)
+        && per_channel(|j| verify_air(air, &proofs[j], max_rows, params, &mut Transcript::with_mode(label, HashMode::Lane(j as u8)))).iter().all(|&ok| ok)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -719,6 +749,55 @@ mod tests {
         let proof = prove(&batch, &p, &PARAMS, &mut Transcript::new(b"stark-test"));
         assert_eq!(proof.rows, 5 * 256);
         assert!(verify(&proof, &p, &PARAMS, &mut Transcript::new(b"stark-test")));
+    }
+
+    /// Per-lane mode: each lane is a separate proof whose hashes and challenges live in that
+    /// lane's field only.
+    #[test]
+    fn per_lane_proofs_verify_alone_and_reject_forgeries() {
+        let p = Modulus256::secp256k1();
+        let mut traces: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] =
+            std::array::from_fn(|ch| rows(&p, 256, 200 + ch as u64).iter().map(|r| r.limbs()).collect());
+        let air = MulModAir { p: &p };
+        let max = DEFAULT_RNS_CHANNELS << PARAMS.log_rows;
+        let proofs = prove_air_lanes(&air, &traces, 5 * 256, &PARAMS, b"lanes");
+        assert!(verify_air_lanes(&air, &proofs, max, &PARAMS, b"lanes"));
+        for (j, pr) in proofs.iter().enumerate() {
+            // only lane j is present in the proof
+            for o in pr.openings.iter().flatten() {
+                assert!((0..DEFAULT_RNS_CHANNELS).all(|ch| (ch == j) == !o.main[ch].is_empty()));
+            }
+            assert!(fri::layer_len(&pr.fri.final_layer) > 0 && pr.fri.final_layer.iter().filter(|v| !v.is_empty()).count() == 1);
+            // a lane's proof does not verify as another lane, nor in unified mode
+            let other = (j + 1) % DEFAULT_RNS_CHANNELS;
+            assert!(!verify_air(&air, pr, max, &PARAMS, &mut Transcript::with_mode(b"lanes", HashMode::Lane(other as u8))));
+            assert!(!verify_air(&air, pr, max, &PARAMS, &mut Transcript::with_mode(b"lanes", HashMode::Poseidon2)));
+        }
+        // swapping two lanes' proofs is rejected
+        let mut swapped = proofs.clone();
+        swapped.swap(0, 4);
+        assert!(!verify_air_lanes(&air, &swapped, max, &PARAMS, b"lanes"));
+
+        // a tampered opening in one lane's proof
+        let mut bad = proofs.clone();
+        bad[2].openings[3][0].main[2][7] ^= 1;
+        assert!(!verify_air_lanes(&air, &bad, max, &PARAMS, b"lanes"));
+        // values smuggled into an absent lane
+        let mut bad = proofs.clone();
+        bad[2].openings[0][0].main[0] = vec![0; NUM_COLUMNS + 1];
+        assert!(!verify_air_lanes(&air, &bad, max, &PARAMS, b"lanes"));
+
+        // a forged row in lane 3 only: that lane's proof fails
+        let mut row = rows(&p, 1, 203)[0].clone();
+        let fake = (row.r_value() + 1u32) % &p.value;
+        row.r = crate::uint256::to_bytes32(&fake);
+        row.s = crate::uint256::to_bytes32(&(&p.value - &fake - 1u32));
+        traces[3][0] = row.limbs();
+        let forged = prove_air_lanes(&air, &traces, 5 * 256, &PARAMS, b"lanes");
+        for j in 0..DEFAULT_RNS_CHANNELS {
+            let ok = verify_air(&air, &forged[j], max, &PARAMS, &mut Transcript::with_mode(b"lanes", HashMode::Lane(j as u8)));
+            assert_eq!(ok, j != 3, "lane {j}");
+        }
     }
 
     #[test]

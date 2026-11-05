@@ -566,6 +566,27 @@ mod tests {
         assert!(!verify(&st, &st.old_root(), &st.new_root(), &bad, &P, &mut t()));
     }
 
+    /// Recursion path: one proof per lane, each with Poseidon2 over its own field.
+    #[test]
+    fn per_lane_proofs_each_verify_in_their_own_field() {
+        use crate::hash::HashMode;
+        let (addrs, old, txs) = setup(300);
+        let (st, traces) = build(&addrs, &old, &txs, 8, true).unwrap();
+        let t0 = std::time::Instant::now();
+        let proofs = stark::prove_air_lanes(&StateAir { st: &st }, &traces, st.num_txs(), &P, b"state-test");
+        eprintln!("5 per-lane state proofs: {:?}", t0.elapsed());
+        for (j, pr) in proofs.iter().enumerate() {
+            let t = || Transcript::with_mode(b"state-test", HashMode::Lane(j as u8));
+            assert!(verify(&st, &st.old_root(), &st.new_root(), pr, &P, &mut t()), "lane {j}");
+            let mut bad = pr.clone();
+            bad.openings[1][0].aux[j][2].c[1] ^= 1;
+            assert!(!verify(&st, &st.old_root(), &st.new_root(), &bad, &P, &mut t()));
+            let mut other = st.clone();
+            other.final_ts[j][0] += 2;
+            assert!(!verify(&other, &other.old_root(), &other.new_root(), pr, &P, &mut t()));
+        }
+    }
+
     #[test]
     fn proof_from_one_lane_split_cannot_be_reused() {
         let (addrs, old, txs) = setup(100);

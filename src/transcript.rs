@@ -26,12 +26,15 @@ pub struct Transcript {
     counter: u64,
     sponge: Option<PoseidonSponge<Fr>>,
     p2: Option<Poseidon2Duplex>,
+    lane: Option<u8>,
 }
 
 /// Duplex sponge over Poseidon2-KoalaBear: rate 8, capacity 8. Absorbing overwrites rate words
 /// and permutes per block of 8; squeezing permutes and reads the rate.
 #[derive(Clone)]
 pub struct Poseidon2Duplex {
+    /// The field (RNS channel) the permutation runs in.
+    pub ch: usize,
     pub state: [u32; crate::poseidon2::WIDTH],
     pending: Vec<u32>,
     out: Vec<u32>,
@@ -41,7 +44,10 @@ pub struct Poseidon2Duplex {
 
 impl Poseidon2Duplex {
     pub fn new(domain: &[u32]) -> Self {
-        let mut d = Self { state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new(), log: Vec::new() };
+        Self::new_ch(domain, crate::poseidon2::KOALA)
+    }
+    pub fn new_ch(domain: &[u32], ch: usize) -> Self {
+        let mut d = Self { ch, state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new(), log: Vec::new() };
         d.absorb(domain);
         d
     }
@@ -55,7 +61,7 @@ impl Poseidon2Duplex {
     }
     fn permute_with(&mut self, block: &[u32]) {
         self.state[..8].copy_from_slice(block);
-        crate::poseidon2::permute(&mut self.state);
+        crate::poseidon2::permute_ch(&mut self.state, self.ch);
         self.log.push((block.try_into().unwrap(), self.state));
     }
 
@@ -75,14 +81,24 @@ impl Poseidon2Duplex {
 /// KoalaBear words a Poseidon2 transcript absorbs for one byte message: tag, length and the
 /// data in 3-byte chunks (each < 2^24 < p).
 pub fn poseidon2_message(label: &[u8], data: &[u8]) -> Vec<u32> {
-    let mut v = vec![crate::hash::tag_word(label), data.len() as u32];
+    poseidon2_message_ch(label, data, crate::poseidon2::KOALA)
+}
+
+/// Same in F_{m_ch} (3-byte chunks and lengths stay below every lane prime).
+pub fn poseidon2_message_ch(label: &[u8], data: &[u8], ch: usize) -> Vec<u32> {
+    let mut v = vec![crate::hash::tag_word_ch(label, ch), data.len() as u32];
     v.extend(data.chunks(3).map(|c| c.iter().rev().fold(0u32, |a, &b| (a << 8) | b as u32)));
     v
 }
 
 /// Words for an absorbed digest: tag, the marker 2^30 (never a byte-message length here), 8 words.
 pub fn poseidon2_digest(label: &[u8], d: &[u32; 8]) -> Vec<u32> {
-    let mut v = vec![crate::hash::tag_word(label), 1 << 30];
+    poseidon2_digest_ch(label, d, crate::poseidon2::KOALA)
+}
+
+/// Same in F_{m_ch} (2^30 is below every lane prime).
+pub fn poseidon2_digest_ch(label: &[u8], d: &[u32; 8], ch: usize) -> Vec<u32> {
+    let mut v = vec![crate::hash::tag_word_ch(label, ch), 1 << 30];
     v.extend_from_slice(d);
     v
 }
@@ -110,8 +126,14 @@ impl Transcript {
             s.absorb(&poseidon_message(b"SS-RAP/v2/transcript", label));
             s
         });
-        let p2 = (mode == HashMode::Poseidon2).then(|| Poseidon2Duplex::new(&poseidon2_message(b"SS-RAP/v2/transcript", label)));
-        Self { state: *h.finalize().as_bytes(), counter: 0, sponge, p2 }
+        let p2 = matches!(mode, HashMode::Poseidon2 | HashMode::Lane(_)).then(|| {
+            let ch = mode.p2_channel();
+            Poseidon2Duplex::new_ch(&poseidon2_message_ch(b"SS-RAP/v2/transcript", label, ch), ch)
+        });
+        Self { state: *h.finalize().as_bytes(), counter: 0, sponge, p2, lane: match mode {
+            HashMode::Lane(j) => Some(j),
+            _ => None,
+        } }
     }
 
     /// The Poseidon2 duplex, when in that mode (the recursion layer reads its permutation log).
@@ -120,7 +142,9 @@ impl Transcript {
     }
 
     pub fn mode(&self) -> HashMode {
-        if self.sponge.is_some() {
+        if let Some(j) = self.lane {
+            HashMode::Lane(j)
+        } else if self.sponge.is_some() {
             HashMode::Poseidon
         } else if self.p2.is_some() {
             HashMode::Poseidon2
@@ -133,7 +157,7 @@ impl Transcript {
     /// goes in as its 8 field words (what the recursion AIR sees).
     pub fn absorb_digest(&mut self, label: &[u8], h: &crate::hash::Hash) {
         if let Some(d) = self.p2.as_mut() {
-            d.absorb(&poseidon2_digest(label, &crate::hash::hash_to_words(h)));
+            d.absorb(&poseidon2_digest_ch(label, &crate::hash::hash_to_words(h), d.ch));
             return;
         }
         self.absorb(label, h);
@@ -143,7 +167,7 @@ impl Transcript {
         if let Some(d) = self.p2.as_mut() {
             // two words: w1 * p + w2 is uniform on [0, p^2), p^2 > 2^61
             let (w1, w2) = (d.squeeze() as u64, d.squeeze() as u64);
-            return Some(w1 * crate::poseidon2::P as u64 + w2);
+            return Some(w1 * crate::RNS_MODULI[d.ch] as u64 + w2);
         }
         let s = self.sponge.as_mut()?;
         let x = s.squeeze_field_elements::<Fr>(1)[0];
@@ -153,7 +177,8 @@ impl Transcript {
     /// Absorb a labelled message. Length-prefixed so that messages cannot be re-split.
     pub fn absorb(&mut self, label: &[u8], data: &[u8]) {
         if let Some(d) = self.p2.as_mut() {
-            d.absorb(&poseidon2_message(label, data));
+            let ch = d.ch;
+            d.absorb(&poseidon2_message_ch(label, data, ch));
             return;
         }
         if let Some(s) = self.sponge.as_mut() {
@@ -187,6 +212,7 @@ impl Transcript {
 
     /// Uniform element of F_m (rejection sampling on 32-bit words, no modulo bias).
     pub fn challenge_base(&mut self, label: &[u8], ch: usize) -> u32 {
+        debug_assert!(self.lane.is_none_or(|j| j as usize == ch), "per-lane transcript asked for another lane");
         let m = RNS_MODULI[ch];
         if let Some(x) = self.squeeze_u64() {
             return (x % m as u64) as u32;
@@ -212,9 +238,11 @@ impl Transcript {
         )
     }
 
-    /// One independent extension challenge per RNS channel.
+    /// One independent extension challenge per RNS channel the proof covers (zero for lanes
+    /// outside a per-lane proof).
     pub fn challenge_ext4_all(&mut self, label: &[u8]) -> [Extension4; DEFAULT_RNS_CHANNELS] {
-        std::array::from_fn(|ch| self.challenge_ext4(label, ch))
+        let lanes = self.mode().lanes();
+        std::array::from_fn(|ch| if lanes.contains(&ch) { self.challenge_ext4(label, ch) } else { Extension4::ZERO })
     }
 
     /// Uniform index in [0, bound), bound a power of two (FRI query positions).

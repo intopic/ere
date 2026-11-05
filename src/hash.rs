@@ -23,6 +23,29 @@ pub enum HashMode {
     /// Poseidon2 over KoalaBear (`poseidon2.rs`): what the recursion layer verifies in AIR.
     /// Every lane value is below the KoalaBear prime, so leaves hash the values directly.
     Poseidon2,
+    /// Per-lane mode for the recursion path (docs/REKURSIONI.md, "pemë për korsi"): the proof
+    /// covers lane j only, and its trees and transcript use Poseidon2 over that lane's own
+    /// field F_{m_j}, so the lane can be verified entirely inside F_{m_j}.
+    Lane(u8),
+}
+
+const ALL_LANES: [usize; crate::DEFAULT_RNS_CHANNELS] = [0, 1, 2, 3, 4];
+
+impl HashMode {
+    /// The lanes (RNS channels) a proof in this mode covers.
+    pub fn lanes(self) -> &'static [usize] {
+        match self {
+            HashMode::Lane(j) => &ALL_LANES[j as usize..j as usize + 1],
+            _ => &ALL_LANES,
+        }
+    }
+    /// The field the Poseidon2 hash and transcript run in (KoalaBear in unified mode).
+    pub fn p2_channel(self) -> usize {
+        match self {
+            HashMode::Lane(j) => j as usize,
+            _ => crate::poseidon2::KOALA,
+        }
+    }
 }
 
 /// A Poseidon2 digest as 8 field words (little-endian u32s of the 32-byte hash).
@@ -40,7 +63,12 @@ pub fn words_to_hash(w: &[u32; 8]) -> Hash {
 
 /// Domain tag as a KoalaBear word.
 pub fn tag_word(tag: &[u8]) -> u32 {
-    u32::from_le_bytes(blake3::hash(tag).as_bytes()[..4].try_into().unwrap()) % crate::poseidon2::P
+    tag_word_ch(tag, crate::poseidon2::KOALA)
+}
+
+/// Domain tag as a word of F_{m_ch}.
+pub fn tag_word_ch(tag: &[u8], ch: usize) -> u32 {
+    u32::from_le_bytes(blake3::hash(tag).as_bytes()[..4].try_into().unwrap()) % crate::RNS_MODULI[ch]
 }
 
 /// Values packed per field element in Poseidon leaves (8 * 31 = 248 bits < 253).
@@ -111,6 +139,13 @@ pub fn hash_leaf(mode: HashMode, tag: &[u8], values: &[u32]) -> Hash {
             inputs.extend_from_slice(values);
             words_to_hash(&crate::poseidon2::hash(&inputs))
         }
+        HashMode::Lane(j) => {
+            let ch = j as usize;
+            let mut inputs = vec![tag_word_ch(tag, ch)];
+            inputs.extend_from_slice(values);
+            debug_assert!(values.iter().all(|&v| v < crate::RNS_MODULI[ch]));
+            words_to_hash(&crate::poseidon2::hash_ch(&inputs, ch))
+        }
     }
 }
 
@@ -124,5 +159,6 @@ pub fn hash_node(mode: HashMode, l: &Hash, r: &Hash) -> Hash {
         }
         HashMode::Poseidon => fr_to_hash(&poseidon_hash(&[hash_to_fr(l), hash_to_fr(r)])),
         HashMode::Poseidon2 => words_to_hash(&crate::poseidon2::compress(&hash_to_words(l), &hash_to_words(r))),
+        HashMode::Lane(j) => words_to_hash(&crate::poseidon2::compress_ch(&hash_to_words(l), &hash_to_words(r), j as usize)),
     }
 }

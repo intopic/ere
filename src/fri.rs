@@ -55,13 +55,14 @@ pub struct FriProof {
 
 impl FriProof {
     pub fn size_bytes(&self) -> usize {
-        let opening: usize = self.queries.iter().flatten().map(|o| DEFAULT_RNS_CHANNELS * 2 * 16 + o.path.len() * 32).sum();
+        let lanes = self.final_layer.iter().filter(|v| !v.is_empty()).count();
+        let opening: usize = self.queries.iter().flatten().map(|o| lanes * 2 * 16 + o.path.len() * 32).sum();
         self.layer_roots.len() * 32 + self.final_layer.iter().map(|v| v.len() * 16).sum::<usize>() + opening
     }
 }
 
 fn leaf_hash(mode: HashMode, pair: &Pair) -> Hash {
-    let v: Vec<u32> = pair.iter().flat_map(|p| p[0].c.into_iter().chain(p[1].c)).collect();
+    let v: Vec<u32> = mode.lanes().iter().flat_map(|&ch| pair[ch][0].c.into_iter().chain(pair[ch][1].c)).collect();
     hash_leaf(mode, b"SS-RAP/v2/fri-leaf", &v)
 }
 
@@ -76,7 +77,7 @@ pub struct Tree {
 
 impl Tree {
     fn build(mode: HashMode, layer: &Layer) -> Self {
-        let half = layer[0].len() / 2;
+        let half = layer_len(layer) / 2;
         let leaves = crate::par_map(half, |j| leaf_hash(mode, &pair_at(layer, j)));
         Self::from_leaves(mode, leaves)
     }
@@ -112,9 +113,14 @@ pub fn verify_path(mode: HashMode, root: &Hash, leaf: Hash, mut idx: usize, path
     &h == root
 }
 
+/// Length of a layer: lanes outside a per-lane proof are empty.
+pub fn layer_len(layer: &Layer) -> usize {
+    layer.iter().map(Vec::len).max().unwrap_or(0)
+}
+
 fn pair_at(layer: &Layer, j: usize) -> Pair {
-    let half = layer[0].len() / 2;
-    std::array::from_fn(|ch| [layer[ch][j], layer[ch][j + half]])
+    let half = layer_len(layer) / 2;
+    std::array::from_fn(|ch| if layer[ch].is_empty() { [Extension4::ZERO; 2] } else { [layer[ch][j], layer[ch][j + half]] })
 }
 
 fn fold_value(f0: Extension4, f1: Extension4, alpha: &Extension4, inv_x: u32, ch: usize) -> Extension4 {
@@ -125,9 +131,12 @@ fn fold_value(f0: Extension4, f1: Extension4, alpha: &Extension4, inv_x: u32, ch
 }
 
 fn fold_layer(layer: &Layer, alphas: &[Extension4; DEFAULT_RNS_CHANNELS], shift: &[u32; DEFAULT_RNS_CHANNELS]) -> Layer {
-    let n = layer[0].len();
+    let n = layer_len(layer);
     let half = n / 2;
     std::array::from_fn(|ch| {
+        if layer[ch].is_empty() {
+            return Vec::new();
+        }
         let w = root_of_unity(n, ch);
         let mut xs = Vec::with_capacity(half);
         let mut x = shift[ch];
@@ -145,7 +154,11 @@ fn fold_layer(layer: &Layer, alphas: &[Extension4; DEFAULT_RNS_CHANNELS], shift:
 pub fn prove(coeffs: &[Vec<u32>; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> FriProof {
     let d = 1usize << params.log_degree;
     let blowup = 1usize << params.log_blowup;
+    let lanes = t.mode().lanes();
     let initial: Layer = std::array::from_fn(|ch| {
+        if !lanes.contains(&ch) {
+            return Vec::new();
+        }
         assert!(coeffs[ch].len() <= d, "polynomial degree too high for params");
         let mut c = coeffs[ch].clone();
         c.resize(d, 0);
@@ -162,7 +175,9 @@ pub fn prove_from_evaluations(initial: Layer, params: &FriParams, t: &mut Transc
 /// FRI on the coset shift * <w> (per channel). Returns the proof and the layer-0 query indices
 /// (each index i opens positions i and i + n/2), so that a STARK can open its trace there.
 pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> (FriProof, Vec<usize>) {
-    assert_eq!(initial[0].len(), params.domain_size());
+    for ch in 0..DEFAULT_RNS_CHANNELS {
+        assert_eq!(initial[ch].len(), if t.mode().lanes().contains(&ch) { params.domain_size() } else { 0 });
+    }
     let mut shift = *shift;
     t.absorb(b"fri/params", &[params.log_degree as u8, params.log_blowup as u8, params.num_queries as u8]);
     let mut layers = vec![initial];
@@ -190,7 +205,7 @@ pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: 
                 .iter()
                 .zip(&trees)
                 .map(|(layer, tree)| {
-                    let j = i % (layer[0].len() / 2);
+                    let j = i % (layer_len(layer) / 2);
                     LayerOpening { pair: pair_at(layer, j), path: tree.path(j) }
                 })
                 .collect()
@@ -221,8 +236,15 @@ fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: 
     if proof.layer_roots.len() != rounds || proof.queries.len() != params.num_queries {
         return None;
     }
-    if proof.final_layer.iter().any(|v| v.len() != blowup || v.iter().any(|e| *e != v[0])) {
-        return None; // last layer must be a constant
+    let lanes = t.mode().lanes();
+    for (ch, v) in proof.final_layer.iter().enumerate() {
+        if !lanes.contains(&ch) {
+            if !v.is_empty() {
+                return None;
+            }
+        } else if v.len() != blowup || v.iter().any(|e| *e != v[0]) {
+            return None; // last layer must be a constant
+        }
     }
     t.absorb(b"fri/params", &[params.log_degree as u8, params.log_blowup as u8, params.num_queries as u8]);
     let mut alphas = Vec::with_capacity(rounds);
@@ -247,7 +269,7 @@ fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: 
             {
                 return None;
             }
-            for ch in 0..DEFAULT_RNS_CHANNELS {
+            for &ch in lanes {
                 let x = mul_mod_channel(shift[ch], pow(root_of_unity(n, ch), j as u64, ch), ch);
                 let inv_x = mod_inv_single(x, RNS_MODULI[ch]);
                 let folded = fold_value(open.pair[ch][0], open.pair[ch][1], &alphas[l][ch], inv_x, ch);
