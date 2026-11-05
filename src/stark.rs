@@ -198,7 +198,7 @@ struct Layout {
 }
 
 impl Layout {
-    fn of<A: Air>(air: &A) -> Self {
+    fn of<A: Air + ?Sized>(air: &A) -> Self {
         assert!(air.byte_cols() <= air.width());
         Self { width: air.width(), bytes: air.byte_cols(), bus: air.num_bus() }
     }
@@ -288,7 +288,7 @@ struct LaneCtx {
 
 /// C(x) = sum_k gamma^k * constraint_k at one point of one lane.
 #[allow(clippy::too_many_arguments)]
-fn composition<A: Air>(air: &A, l: &Layout, main: &[u32], main_next: &[u32], aux: &[Extension4], h_next: &Extension4, t: u32, pt: &Point, cx: &LaneCtx, ch: usize, base: &mut Vec<u32>, bus: &mut Vec<BusTerm>) -> Extension4 {
+fn composition<A: Air + ?Sized>(air: &A, l: &Layout, main: &[u32], main_next: &[u32], aux: &[Extension4], h_next: &Extension4, t: u32, pt: &Point, cx: &LaneCtx, ch: usize, base: &mut Vec<u32>, bus: &mut Vec<BusTerm>) -> Extension4 {
     let (alpha, gamma) = (&cx.c.alpha, &cx.gamma);
     let mut acc = Extension4::ZERO;
     let mut push = |v: Extension4| acc = acc.mul(gamma, ch).add(&v, ch);
@@ -351,13 +351,13 @@ pub fn q_leaf(mode: HashMode, q: &[Extension4; DEFAULT_RNS_CHANNELS]) -> Hash {
     hash_leaf(mode, b"SS-RAP/v2/quotient", &mode.lanes().iter().flat_map(|&ch| q[ch].c).collect::<Vec<_>>())
 }
 
-fn start_transcript<A: Air>(t: &mut Transcript, air: &A, params: &StarkParams, rows: usize) {
+fn start_transcript<A: Air + ?Sized>(t: &mut Transcript, air: &A, params: &StarkParams, rows: usize) {
     t.absorb(b"stark/statement", &air.statement());
     t.absorb(b"stark/shape", &[params.log_rows as u8, params.log_blowup as u8, params.num_queries as u8]);
     t.absorb(b"stark/rows", &(rows as u64).to_le_bytes());
 }
 
-fn lane_ctx<A: Air>(air: &A, c: Challenges, gamma: Extension4, n_rows: usize, ch: usize) -> LaneCtx {
+fn lane_ctx<A: Air + ?Sized>(air: &A, c: Challenges, gamma: Extension4, n_rows: usize, ch: usize) -> LaneCtx {
     let n_inv = mod_inv_single(n_rows as u32 % RNS_MODULI[ch], RNS_MODULI[ch]);
     LaneCtx { c, gamma, s_over_n: air.bus_sum(&c, ch).mul_scalar(n_inv, ch) }
 }
@@ -369,23 +369,37 @@ fn draw_challenges(t: &mut Transcript) -> [Challenges; DEFAULT_RNS_CHANNELS] {
     std::array::from_fn(|ch| Challenges { alpha: a[ch], beta: b[ch], rho: r[ch] })
 }
 
-/// Proves one trace per lane (RNS channel). Each trace has 2^log_rows rows of `air.width()`
-/// values; `rows` is the public count of real work items (absorbed into the transcript).
-pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], rows: usize, params: &StarkParams, t: &mut Transcript) -> StarkProof {
+fn profiler() -> impl FnMut(&str) {
+    let prof = std::env::var("SSRAP_PROFILE").is_ok();
+    let mut tp = std::time::Instant::now();
+    move |name: &str| {
+        if prof {
+            eprintln!("  {name}: {:?}", tp.elapsed());
+        }
+        tp = std::time::Instant::now();
+    }
+}
+
+/// Committed main trace of one table (phase 1).
+struct MainPhase {
+    l: Layout,
+    n_rows: usize,
+    blowup: usize,
+    n: usize,
+    hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS],
+    lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS],
+    tree: Tree,
+}
+
+fn phase_main<A: Air + ?Sized>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], params: &StarkParams, mode: HashMode) -> MainPhase {
     params.check();
     let l = Layout::of(air);
     let n_rows = 1usize << params.log_rows;
     let blowup = 1usize << params.log_blowup;
     let n = n_rows * blowup;
-    start_transcript(t, air, params, rows);
-    let mode = t.mode();
-    let prof = std::env::var("SSRAP_PROFILE").is_ok();
-    let mut tp = std::time::Instant::now();
-    let mut lap = |name: &str| { if prof { eprintln!("  {name}: {:?}", tp.elapsed()); } tp = std::time::Instant::now(); };
     let lanes = mode.lanes();
-
-    // ---- 1. main trace: AIR columns + byte multiplicities (per lane)
-    let main_hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
+    // AIR columns + byte multiplicities (per lane)
+    let hs: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
         let trace = &traces[ch];
         assert_eq!(trace.len(), n_rows);
         let m = RNS_MODULI[ch];
@@ -402,17 +416,28 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols.push(mult);
         cols
     });
-    let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| crate::par_map(main_hs[ch].len(), |c| coset_lde(&main_hs[ch][c], blowup, ch)));
-    lap("lde_main");
-    let main_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&main_lde, i))));
-    lap("hash_main");
-    t.absorb_digest(b"stark/main", &main_tree.root());
-    let chals = draw_challenges(t);
+    let lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| crate::par_map(hs[ch].len(), |c| coset_lde(&hs[ch][c], blowup, ch)));
+    let tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&lde, i))));
+    MainPhase { l, n_rows, blowup, n, hs, lde, tree }
+}
 
-    // ---- 2. aux trace on the trace domain, then LDE
-    let aux_lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
+/// Committed aux trace (phase 2). `sums[ch]`: the table's LogUp total S. None: compute it from
+/// the rows (a table of a multi-table proof, which claims its own share of the shared bus).
+struct AuxPhase {
+    lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS],
+    tree: Tree,
+    /// S / N per lane.
+    s_over_n: [Extension4; DEFAULT_RNS_CHANNELS],
+    /// S per lane.
+    sums: [Extension4; DEFAULT_RNS_CHANNELS],
+}
+
+fn phase_aux<A: Air + ?Sized>(air: &A, mp: &MainPhase, chals: &[Challenges; DEFAULT_RNS_CHANNELS], sums: Option<[Extension4; DEFAULT_RNS_CHANNELS]>, mode: HashMode) -> AuxPhase {
+    let (l, n_rows) = (&mp.l, mp.n_rows);
+    let lanes = mode.lanes();
+    let per: [(Vec<Vec<Extension4>>, Extension4, Extension4); DEFAULT_RNS_CHANNELS] = per_lane(lanes, |ch| {
         let c = chals[ch];
-        let main_h = &main_hs[ch];
+        let main_h = &mp.hs[ch];
         let mut cols: Vec<Vec<Extension4>> = Vec::with_capacity(l.aux_cols());
         for col in main_h.iter().take(l.bytes) {
             let den: Vec<Extension4> = col.iter().map(|&v| c.alpha.sub(&Extension4::from_base(v), ch)).collect();
@@ -436,32 +461,57 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
             let den: Vec<Extension4> = terms.iter().map(|ts| ts[k].den).collect();
             cols.push(batch_inverse_ext4(&den, ch).expect("beta hit a fingerprint"));
         }
-        let cx = lane_ctx(air, c, Extension4::ZERO, n_rows, ch);
+        let steps: Vec<Extension4> = (0..n_rows)
+            .map(|r| {
+                let mut step = Extension4::ZERO;
+                for col in cols.iter().take(l.bytes) {
+                    step = step.add(&col[r], ch);
+                }
+                step = step.sub(&cols[l.inv_t()][r].mul_scalar(main_h[l.mult()][r], ch), ch);
+                for (k, term) in terms[r].iter().enumerate() {
+                    step = step.add(&cols[l.bus0() + k][r].mul_scalar(term.weight, ch), ch);
+                }
+                step
+            })
+            .collect();
+        let s = match sums {
+            Some(s) => s[ch],
+            None => steps.iter().fold(Extension4::ZERO, |a, x| a.add(x, ch)),
+        };
+        let s_over_n = s.mul_scalar(mod_inv_single(n_rows as u32 % RNS_MODULI[ch], RNS_MODULI[ch]), ch);
         let mut h = vec![Extension4::ZERO; n_rows];
         for r in 0..n_rows - 1 {
-            let mut step = Extension4::ZERO;
-            for col in cols.iter().take(l.bytes) {
-                step = step.add(&col[r], ch);
-            }
-            step = step.sub(&cols[l.inv_t()][r].mul_scalar(main_h[l.mult()][r], ch), ch);
-            for (k, term) in terms[r].iter().enumerate() {
-                step = step.add(&cols[l.bus0() + k][r].mul_scalar(term.weight, ch), ch);
-            }
-            h[r + 1] = h[r].add(&step, ch).sub(&cx.s_over_n, ch);
+            h[r + 1] = h[r].add(&steps[r], ch).sub(&s_over_n, ch);
         }
         cols.push(h);
-        crate::par_map(cols.len(), |c| coset_lde_ext(&cols[c], blowup, ch))
+        (crate::par_map(cols.len(), |c| coset_lde_ext(&cols[c], mp.blowup, ch)), s, s_over_n)
     });
-    lap("aux+lde");
-    let aux_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/aux", &aux_values(&aux_lde, i))));
-    lap("hash_aux");
-    t.absorb_digest(b"stark/aux", &aux_tree.root());
-    let gammas = t.challenge_ext4_all(b"stark/gamma");
+    let parts = per;
+    let s_over_n = std::array::from_fn(|ch| parts[ch].2);
+    let sums = std::array::from_fn(|ch| parts[ch].1);
+    let lde: [Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS] = parts.map(|p| p.0);
+    let tree = Tree::from_leaves(mode, crate::par_map(mp.n, |i| hash_leaf(mode, b"SS-RAP/v2/aux", &aux_values(&lde, i))));
+    AuxPhase { lde, tree, s_over_n, sums }
+}
 
-    // ---- 3. quotient Q = C / (X^N - 1) on the LDE coset
-    let quotient: Layer = per_lane(lanes, |ch| {
+/// Quotient Q = C / (X^N - 1) on the LDE coset, committed (phase 3).
+struct QuotientPhase {
+    q: Layer,
+    tree: Tree,
+}
+
+impl QuotientPhase {
+    fn at(&self, i: usize) -> [Extension4; DEFAULT_RNS_CHANNELS] {
+        std::array::from_fn(|ch| self.q[ch].get(i).copied().unwrap_or_default())
+    }
+}
+
+fn phase_quotient<A: Air + ?Sized>(air: &A, mp: &MainPhase, ap: &AuxPhase, chals: &[Challenges; DEFAULT_RNS_CHANNELS], gammas: &[Extension4; DEFAULT_RNS_CHANNELS], mode: HashMode) -> QuotientPhase {
+    let (l, n_rows, blowup, n) = (&mp.l, mp.n_rows, mp.blowup, mp.n);
+    let (main_lde, aux_lde) = (&mp.lde, &ap.lde);
+    let q: Layer = per_lane(mode.lanes(), |ch| {
         let m = RNS_MODULI[ch];
-        let cx = lane_ctx(air, chals[ch], gammas[ch], n_rows, ch);
+        let cx = LaneCtx { c: chals[ch], gamma: gammas[ch], s_over_n: ap.s_over_n[ch] };
         let w = root_of_unity(n, ch);
         let g = shift(ch);
         let g_n = pow(g, n_rows as u64, ch);
@@ -473,64 +523,57 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         let x_minus_1_inv = crate::batch_inverse_channel(&xs.iter().map(|&x| sub_mod(x, 1, m)).collect::<Vec<_>>(), ch);
         let chunk = n.div_ceil(64).max(1);
         crate::par_map(n.div_ceil(chunk), |part| {
-        let (mut main_pt, mut main_nx) = (vec![0u32; l.main_cols()], vec![0u32; l.main_cols()]);
-        let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
-        let (mut base, mut bus) = (Vec::new(), Vec::new());
-        let mut out = Vec::with_capacity(chunk);
-        for i in part * chunk..((part + 1) * chunk).min(n) {
-            let nx = (i + blowup) % n;
-            for c in 0..l.main_cols() {
-                main_pt[c] = main_lde[ch][c][i];
-                main_nx[c] = main_lde[ch][c][nx];
-            }
-            for c in 0..l.aux_cols() {
-                aux_pt[c] = aux_lde[ch][c][i];
-            }
-            let x = xs[i];
-            let xn1 = sub_mod(mul_mod_channel(g_n, pow(w_b, (i % blowup) as u64, ch), ch), 1, m);
-            let pt = Point { first_row: mul_mod_channel(xn1, x_minus_1_inv[i], ch), not_last: sub_mod(x, last, m) };
-            let h_next = aux_lde[ch][l.sum()][nx];
-            let tv = table_value(&tc, x, n_rows, ch);
-            let c = composition(air, &l, &main_pt, &main_nx, &aux_pt, &h_next, tv, &pt, &cx, ch, &mut base, &mut bus);
-            out.push(c.mul_scalar(z_inv[i % blowup], ch));
-        }
-        out
-        })
-        .concat()
-    });
-    lap("quotient");
-    let q_at = |i: usize| -> [Extension4; DEFAULT_RNS_CHANNELS] { std::array::from_fn(|ch| quotient[ch].get(i).copied().unwrap_or_default()) };
-    let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &q_at(i))));
-    t.absorb_digest(b"stark/quotient", &q_tree.root());
-    lap("hash_q");
-    let deltas = t.challenge_ext4_all(b"stark/delta");
-
-    // ---- 4. FRI on the random combination
-    let f: Layer = per_lane(lanes, |ch| {
-        crate::par_map(n, |i| {
-                let mut main_pt = vec![0u32; l.main_cols()];
-                let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
+            let (mut main_pt, mut main_nx) = (vec![0u32; l.main_cols()], vec![0u32; l.main_cols()]);
+            let mut aux_pt = vec![Extension4::ZERO; l.aux_cols()];
+            let (mut base, mut bus) = (Vec::new(), Vec::new());
+            let mut out = Vec::with_capacity(chunk);
+            for i in part * chunk..((part + 1) * chunk).min(n) {
+                let nx = (i + blowup) % n;
                 for c in 0..l.main_cols() {
                     main_pt[c] = main_lde[ch][c][i];
+                    main_nx[c] = main_lde[ch][c][nx];
                 }
                 for c in 0..l.aux_cols() {
                     aux_pt[c] = aux_lde[ch][c][i];
                 }
-                fri_combination(&main_pt, &aux_pt, &quotient[ch][i], &deltas[ch], ch)
-            })
+                let x = xs[i];
+                let xn1 = sub_mod(mul_mod_channel(g_n, pow(w_b, (i % blowup) as u64, ch), ch), 1, m);
+                let pt = Point { first_row: mul_mod_channel(xn1, x_minus_1_inv[i], ch), not_last: sub_mod(x, last, m) };
+                let h_next = aux_lde[ch][l.sum()][nx];
+                let tv = table_value(&tc, x, n_rows, ch);
+                let c = composition(air, l, &main_pt, &main_nx, &aux_pt, &h_next, tv, &pt, &cx, ch, &mut base, &mut bus);
+                out.push(c.mul_scalar(z_inv[i % blowup], ch));
+            }
+            out
+        })
+        .concat()
+    });
+    let at = |i: usize| -> [Extension4; DEFAULT_RNS_CHANNELS] { std::array::from_fn(|ch| q[ch].get(i).copied().unwrap_or_default()) };
+    let tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &at(i))));
+    QuotientPhase { q, tree }
+}
+
+/// Draws delta, runs FRI on the random combination and opens the queried rows (phase 4).
+fn phase_open(mp: &MainPhase, ap: &AuxPhase, qp: &QuotientPhase, params: &StarkParams, rows: usize, t: &mut Transcript) -> StarkProof {
+    let (l, blowup, n) = (&mp.l, mp.blowup, mp.n);
+    let (main_lde, aux_lde) = (&mp.lde, &ap.lde);
+    let deltas = t.challenge_ext4_all(b"stark/delta");
+    let f: Layer = per_lane(t.mode().lanes(), |ch| {
+        crate::par_map(n, |i| {
+            let main_pt: Vec<u32> = (0..l.main_cols()).map(|c| main_lde[ch][c][i]).collect();
+            let aux_pt: Vec<Extension4> = (0..l.aux_cols()).map(|c| aux_lde[ch][c][i]).collect();
+            fri_combination(&main_pt, &aux_pt, &qp.q[ch][i], &deltas[ch], ch)
+        })
     });
     let shifts: [u32; DEFAULT_RNS_CHANNELS] = std::array::from_fn(shift);
     let (fri_proof, indices) = fri::prove_coset(f, &shifts, &params.fri(), t);
-
-    lap("fri");
-    // ---- 5. openings
     let open = |pos: usize| Opening {
         main: std::array::from_fn(|ch| main_lde[ch].iter().map(|col| col[pos]).collect()),
         aux: std::array::from_fn(|ch| aux_lde[ch].iter().map(|col| col[pos]).collect()),
-        quotient: q_at(pos),
-        main_path: main_tree.path(pos),
-        aux_path: aux_tree.path(pos),
-        q_path: q_tree.path(pos),
+        quotient: qp.at(pos),
+        main_path: mp.tree.path(pos),
+        aux_path: ap.tree.path(pos),
+        q_path: qp.tree.path(pos),
     };
     let openings = indices
         .iter()
@@ -539,8 +582,127 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
             [open(i), open(j), open((i + blowup) % n), open((j + blowup) % n)]
         })
         .collect();
+    StarkProof { rows, main_root: mp.tree.root(), aux_root: ap.tree.root(), q_root: qp.tree.root(), fri: fri_proof, openings }
+}
 
-    StarkProof { rows, main_root: main_tree.root(), aux_root: aux_tree.root(), q_root: q_tree.root(), fri: fri_proof, openings }
+/// Proves one trace per lane (RNS channel). Each trace has 2^log_rows rows of `air.width()`
+/// values; `rows` is the public count of real work items (absorbed into the transcript).
+pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], rows: usize, params: &StarkParams, t: &mut Transcript) -> StarkProof {
+    let mut lap = profiler();
+    start_transcript(t, air, params, rows);
+    let mode = t.mode();
+    let mp = phase_main(air, traces, params, mode);
+    lap("main (lde + tree)");
+    t.absorb_digest(b"stark/main", &mp.tree.root());
+    let chals = draw_challenges(t);
+    let sums = std::array::from_fn(|ch| if mode.lanes().contains(&ch) { air.bus_sum(&chals[ch], ch) } else { Extension4::ZERO });
+    let ap = phase_aux(air, &mp, &chals, Some(sums), mode);
+    lap("aux (lde + tree)");
+    t.absorb_digest(b"stark/aux", &ap.tree.root());
+    let gammas = t.challenge_ext4_all(b"stark/gamma");
+    let qp = phase_quotient(air, &mp, &ap, &chals, &gammas, mode);
+    lap("quotient");
+    t.absorb_digest(b"stark/quotient", &qp.tree.root());
+    let proof = phase_open(&mp, &ap, &qp, params, rows, t);
+    lap("fri + openings");
+    proof
+}
+
+// ---- multi-table proofs: tables of different heights on one bus ------------------------------
+
+/// One proof over several tables, each at its own height, sharing the bus challenges. Each
+/// table claims its share S_t of the bus; the verifier checks that the shares add up to the
+/// public total (the sum of every table's `bus_sum`).
+#[derive(Clone, Debug)]
+pub struct MultiProof {
+    pub tables: Vec<StarkProof>,
+    pub sums: Vec<[Extension4; DEFAULT_RNS_CHANNELS]>,
+}
+
+impl MultiProof {
+    pub fn size_bytes(&self) -> usize {
+        self.tables.iter().map(|p| p.size_bytes()).sum::<usize>() + self.sums.len() * DEFAULT_RNS_CHANNELS * 16
+    }
+}
+
+fn absorb_sums(t: &mut Transcript, s: &[Extension4; DEFAULT_RNS_CHANNELS]) {
+    let bytes: Vec<u8> = s.iter().flat_map(|e| e.c).flat_map(|x| x.to_le_bytes()).collect();
+    t.absorb(b"stark/multi/sum", &bytes);
+}
+
+/// Proves `airs[k]` on `traces[k]` with `params[k]` (heights may differ, blowup must not).
+pub fn prove_multi(airs: &[&dyn Air], traces: &[[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]], rows: usize, params: &[StarkParams], t: &mut Transcript) -> MultiProof {
+    assert!(airs.len() == traces.len() && airs.len() == params.len() && !airs.is_empty());
+    let mut lap = profiler();
+    t.absorb(b"stark/multi", &(airs.len() as u32).to_le_bytes());
+    for (air, p) in airs.iter().zip(params) {
+        start_transcript(t, *air, p, rows);
+    }
+    let mode = t.mode();
+    let mains: Vec<MainPhase> = airs.iter().zip(traces).zip(params).map(|((air, tr), p)| phase_main(*air, tr, p, mode)).collect();
+    lap("main (lde + tree)");
+    for mp in &mains {
+        t.absorb_digest(b"stark/main", &mp.tree.root());
+    }
+    let chals = draw_challenges(t);
+    let auxs: Vec<AuxPhase> = airs.iter().zip(&mains).map(|(air, mp)| phase_aux(*air, mp, &chals, None, mode)).collect();
+    lap("aux (lde + tree)");
+    for ap in &auxs {
+        absorb_sums(t, &ap.sums);
+        t.absorb_digest(b"stark/aux", &ap.tree.root());
+    }
+    let gammas = t.challenge_ext4_all(b"stark/gamma");
+    let qs: Vec<QuotientPhase> = airs.iter().zip(&mains).zip(&auxs).map(|((air, mp), ap)| phase_quotient(*air, mp, ap, &chals, &gammas, mode)).collect();
+    lap("quotient");
+    for qp in &qs {
+        t.absorb_digest(b"stark/quotient", &qp.tree.root());
+    }
+    let tables = (0..airs.len()).map(|k| phase_open(&mains[k], &auxs[k], &qs[k], &params[k], rows, t)).collect();
+    lap("fri + openings");
+    MultiProof { tables, sums: auxs.iter().map(|a| a.sums).collect() }
+}
+
+/// Verifies a `prove_multi` proof.
+pub fn verify_multi(airs: &[&dyn Air], proof: &MultiProof, max_rows: usize, params: &[StarkParams], t: &mut Transcript) -> bool {
+    let k = airs.len();
+    if k == 0 || params.len() != k || proof.tables.len() != k || proof.sums.len() != k {
+        return false;
+    }
+    let rows = proof.tables[0].rows;
+    if rows > max_rows || proof.tables.iter().any(|p| p.rows != rows) || params.iter().any(|p| p.log_blowup != params[0].log_blowup) {
+        return false;
+    }
+    t.absorb(b"stark/multi", &(k as u32).to_le_bytes());
+    for (air, p) in airs.iter().zip(params) {
+        p.check();
+        start_transcript(t, *air, p, rows);
+    }
+    for p in &proof.tables {
+        t.absorb_digest(b"stark/main", &p.main_root);
+    }
+    let chals = draw_challenges(t);
+    for (p, s) in proof.tables.iter().zip(&proof.sums) {
+        absorb_sums(t, s);
+        t.absorb_digest(b"stark/aux", &p.aux_root);
+    }
+    let gammas = t.challenge_ext4_all(b"stark/gamma");
+    for p in &proof.tables {
+        t.absorb_digest(b"stark/quotient", &p.q_root);
+    }
+    // the shares add up to the public total; inactive lanes carry nothing
+    let lanes = t.mode().lanes();
+    for ch in 0..DEFAULT_RNS_CHANNELS {
+        let total = proof.sums.iter().fold(Extension4::ZERO, |a, s| a.add(&s[ch], ch));
+        let ok = if lanes.contains(&ch) { total == airs.iter().fold(Extension4::ZERO, |a, air| a.add(&air.bus_sum(&chals[ch], ch), ch)) } else { proof.sums.iter().all(|s| s[ch] == Extension4::ZERO) };
+        if !ok {
+            return false;
+        }
+    }
+    (0..k).all(|i| {
+        let n_rows = 1u32 << params[i].log_rows;
+        let s_over_n = std::array::from_fn(|ch| proof.sums[i][ch].mul_scalar(mod_inv_single(n_rows % RNS_MODULI[ch], RNS_MODULI[ch]), ch));
+        check_table(airs[i], &proof.tables[i], &params[i], &chals, &gammas, &s_over_n, t).is_some()
+    })
 }
 
 /// Verifies a proof for `air`. `max_rows` bounds the public row count.
@@ -563,11 +725,7 @@ pub struct StarkView {
 /// `verify_air` that returns the derived challenges on success.
 pub fn verify_air_view<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: &StarkParams, t: &mut Transcript) -> Option<StarkView> {
     params.check();
-    let l = Layout::of(air);
-    let n_rows = 1usize << params.log_rows;
-    let blowup = 1usize << params.log_blowup;
-    let n = n_rows * blowup;
-    if proof.openings.len() != params.num_queries || proof.rows > max_rows {
+    if proof.rows > max_rows {
         return None;
     }
     start_transcript(t, air, params, proof.rows);
@@ -576,11 +734,26 @@ pub fn verify_air_view<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, par
     t.absorb_digest(b"stark/aux", &proof.aux_root);
     let gammas = t.challenge_ext4_all(b"stark/gamma");
     t.absorb_digest(b"stark/quotient", &proof.q_root);
+    let lanes = t.mode().lanes();
+    let n_rows = 1usize << params.log_rows;
+    let s_over_n: [Extension4; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| if lanes.contains(&ch) { lane_ctx(air, chals[ch], gammas[ch], n_rows, ch).s_over_n } else { Extension4::ZERO });
+    check_table(air, proof, params, &chals, &gammas, &s_over_n, t)
+}
+
+/// Draws delta, checks FRI and every opening of one table against its committed roots.
+fn check_table<A: Air + ?Sized>(air: &A, proof: &StarkProof, params: &StarkParams, chals: &[Challenges; DEFAULT_RNS_CHANNELS], gammas: &[Extension4; DEFAULT_RNS_CHANNELS], s_over_n: &[Extension4; DEFAULT_RNS_CHANNELS], t: &mut Transcript) -> Option<StarkView> {
+    let l = Layout::of(air);
+    let n_rows = 1usize << params.log_rows;
+    let blowup = 1usize << params.log_blowup;
+    let n = n_rows * blowup;
+    if proof.openings.len() != params.num_queries {
+        return None;
+    }
     let deltas = t.challenge_ext4_all(b"stark/delta");
     let shifts: [u32; DEFAULT_RNS_CHANNELS] = std::array::from_fn(shift);
     let tcs: [Vec<u32>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(table_coeffs);
     let lanes = t.mode().lanes();
-    let ctxs: [Option<LaneCtx>; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| lanes.contains(&ch).then(|| lane_ctx(air, chals[ch], gammas[ch], n_rows, ch)));
+    let ctxs: [LaneCtx; DEFAULT_RNS_CHANNELS] = std::array::from_fn(|ch| LaneCtx { c: chals[ch], gamma: gammas[ch], s_over_n: s_over_n[ch] });
     let fri_view = fri::verify_view(&proof.fri, &shifts, &params.fri(), t)?;
     let indices = &fri_view.indices;
     let (mut base, mut bus) = (Vec::new(), Vec::new());
@@ -611,7 +784,7 @@ pub fn verify_air_view<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, par
                 let x = mul_mod_channel(shift(ch), pow(root_of_unity(n, ch), pos as u64, ch), ch);
                 let tv = table_value(&tcs[ch], x, n_rows, ch);
                 let pt = point(x, n_rows, ch);
-                let c = composition(air, &l, &here.main[ch], &next.main[ch], &here.aux[ch], &next.aux[ch][l.sum()], tv, &pt, ctxs[ch].as_ref().unwrap(), ch, &mut base, &mut bus);
+                let c = composition(air, &l, &here.main[ch], &next.main[ch], &here.aux[ch], &next.aux[ch][l.sum()], tv, &pt, &ctxs[ch], ch, &mut base, &mut bus);
                 let z = sub_mod(pow(x, n_rows as u64, ch), 1, m);
                 if c != here.quotient[ch].mul_scalar(z, ch) {
                     return None;
@@ -624,10 +797,10 @@ pub fn verify_air_view<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, par
         }
     }
     Some(StarkView {
-        chals,
-        gammas,
+        chals: *chals,
+        gammas: *gammas,
         deltas,
-        s_over_n: std::array::from_fn(|ch| ctxs[ch].as_ref().map_or(Extension4::ZERO, |c| c.s_over_n)),
+        s_over_n: *s_over_n,
         indices: fri_view.indices.clone(),
         fri_alphas: fri_view.alphas.clone(),
     })

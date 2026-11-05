@@ -234,14 +234,6 @@ pub fn permute(state: &mut [u32; WIDTH]) {
     permute_ch(state, KOALA)
 }
 
-fn full_round(state: &mut [u32; WIDTH], rc: &[u32; WIDTH], ch: usize) {
-    let m = RNS_MODULI[ch];
-    for i in 0..WIDTH {
-        state[i] = sbox_ch(add(state[i], rc[i], m), ch);
-    }
-    external_linear_ch(state, ch);
-}
-
 /// 2-to-1 compression of 8-word digests: permute(l || r), keep the first 8 words, add l
 /// (feed-forward, so the compression is not invertible).
 pub fn compress_ch(l: &[u32; 8], r: &[u32; 8], ch: usize) -> [u32; 8] {

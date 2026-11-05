@@ -64,15 +64,32 @@ fn main() {
     let width = alg.stack().width();
     println!("stack: 2^{log_rows} rows x {width} columns; cells used {cells_used}, padded {cells_padded} ({:.1}x)", cells_padded as f64 / cells_used as f64);
 
-    let p = StarkParams { log_rows, log_blowup: 2, num_queries: 16 };
+    let outer_p = StarkParams { log_rows: 0, log_blowup: 2, num_queries: 16 };
+    let t = || Transcript::with_mode(b"recursion", HashMode::Lane(j as u8));
+    if std::env::var("ONE_HEIGHT").is_ok() {
+        let p = StarkParams { log_rows, ..outer_p };
+        let t0 = Instant::now();
+        let tr = alg.traces(p.log_rows);
+        let stack = alg.stack();
+        let outer = prove_air(&stack, &tr, alg.composition.claims.len(), &p, &mut t());
+        println!("outer prove, one height: {:?}, proof {} KiB", t0.elapsed(), outer.size_bytes() / 1024);
+        let t0 = Instant::now();
+        assert!(verify_air(&stack, &outer, 1 << p.log_rows, &p, &mut t()));
+        println!("outer verify: {:?}", t0.elapsed());
+        return;
+    }
+    let mut cells = 0usize;
+    for (ks, log) in alg.groups() {
+        let w: usize = ks.iter().map(|&k| tables[k].2).sum();
+        let names: Vec<&str> = ks.iter().map(|&k| tables[k].0).collect();
+        println!("group 2^{log} x {w}: {names:?}");
+        cells += w << log;
+    }
+    println!("cells with groups: {cells} ({:.1}x less than one height)", cells_padded as f64 / cells as f64);
     let t0 = Instant::now();
-    let tr = alg.traces(p.log_rows);
-    println!("outer traces: {:?}", t0.elapsed());
-    let stack = alg.stack();
+    let (outer, params) = alg.prove_split(&outer_p, &mut t());
+    println!("outer prove (groups, traces included): {:?}, proof {} KiB", t0.elapsed(), outer.size_bytes() / 1024);
     let t0 = Instant::now();
-    let outer = prove_air(&stack, &tr, alg.composition.claims.len(), &p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8)));
-    println!("outer prove: {:?}, proof {} KiB", t0.elapsed(), outer.size_bytes() / 1024);
-    let t0 = Instant::now();
-    assert!(verify_air(&stack, &outer, 1 << p.log_rows, &p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8))));
+    assert!(alg.verify_split(&outer, &params, &mut t()));
     println!("outer verify: {:?}", t0.elapsed());
 }

@@ -90,3 +90,20 @@ Prova e brendshme: 1000 tx, 2^8 rreshta për korsi, blowup 4, 50 query, një kor
 
 Qelizat e përdorura janë 10.6 M, të mbushura 65.7 M (6.2×): lartësia e përbashkët është humbja kryesore. Nga qelizat
 e përdorura, 97% janë hash-et (gjethet e hapura dhe shtigjet Merkle).
+
+### Pas optimizimeve (R7.4)
+
+| Hapi | Para | Pas |
+|---|---|---|
+| Poseidon2 (një permutim) | 3.2–4.9 µs | 1.2–2.2 µs (modul konstant për çdo fushë, e njëjta dalje) |
+| LDE, kuocienti, kombinimi FRI brenda korsisë | sekuencial | paralel në të gjitha bërthamat |
+| Tabelat | një lartësi (2^14 × 4013, 65.7 M qeliza) | 5 grupe me lartësinë e vet mbi një bus (16.4 M qeliza) |
+| Prova e jashtme e një korsie, 1000 tx, 50 query | ~100 s | **~7.2 s** (4 bërthama CPU), verifikimi ~0.12 s |
+
+Grupet: 2^8 × 2610 (composition, transcript, tree roots, final, index), 2^9 × 37 (fri fold), 2^10 × 100
+(pid roots, public sum), 2^13 × 629 (leaf hash), 2^14 × 637 (merkle).
+
+Prova me shumë tabela (`stark::prove_multi` / `verify_multi`): çdo tabelë angazhon trace-in e vet; sfidat e bus-it
+janë të përbashkëta; çdo tabelë deklaron pjesën e vet S_t të bus-it (e absorbuar para γ) dhe verifikuesi kontrollon
+Σ S_t = shuma publike. Teste: pjesë e zhvendosur mes tabelave, pjesë e ndryshuar, lartësi tjetër, prova të ndërruara,
+të gjitha refuzohen; të gjitha testet e sulmit të R7 kalojnë mbi provën e ndarë.

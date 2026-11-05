@@ -29,7 +29,7 @@ use crate::transcript::Transcript;
 use crate::transcript_air::TranscriptAir;
 use crate::merkle_air::{Digest, MerkleAir, PathClaim};
 use crate::multi_air::Stacked;
-use crate::stark::{shift, verify_air_view, Air, Challenges, StarkParams, StarkProof, StarkView};
+use crate::stark::{prove_multi, shift, verify_air_view, verify_multi, Air, Challenges, MultiProof, StarkParams, StarkProof, StarkView};
 use crate::hash::HashMode;
 use crate::{Extension4, DEFAULT_RNS_CHANNELS};
 
@@ -276,31 +276,98 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
         v
     }
 
-    pub fn stack(&self) -> Stacked<'_> {
-        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air, &self.index, &self.public_sum])
+    fn tables(&self) -> [&dyn Air; 10] {
+        [&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air, &self.index, &self.public_sum]
     }
 
-    /// Smallest stack height that fits every table.
-    pub fn log_rows(&self) -> u32 {
+    /// Rows each table needs (one padding row included).
+    fn table_rows(&self) -> [usize; 10] {
         let merkle_rows: usize = self.merkle.claims.iter().map(|c| c.depth as usize).sum();
-        let need = [self.opened.len() + 1, self.pairs.len() * self.fold.alphas.len() + 1, self.leaves.rows_needed() + 1, merkle_rows + 1, self.transcript.perms + 1, self.merkle.claims.len() + 1, self.public_sum.tuples.len() + 1, 256];
-        need.iter().max().unwrap().next_power_of_two().trailing_zeros()
+        [
+            self.opened.len(),
+            self.pairs.len() * self.fold.alphas.len(),
+            self.leaves.rows_needed(),
+            merkle_rows,
+            self.transcript.perms,
+            self.merkle.claims.len(),
+            self.tree_roots.trees.len(),
+            1,
+            self.index.words_at.len(),
+            self.public_sum.tuples.len(),
+        ]
+        .map(|r| r + 1)
+    }
+
+    fn table_traces(&self, k: usize, log_rows: u32) -> [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] {
+        let lane = self.fold.lane;
+        match k {
+            0 => self.composition.traces(&self.opened, log_rows),
+            1 => self.fold.traces(&self.pairs, log_rows),
+            2 => self.leaves.traces(&self.leaf_words, log_rows),
+            3 => self.merkle.traces(&self.paths, log_rows),
+            4 => self.transcript.traces(&self.duplex_log, &self.mult_ext, &self.mult_word, log_rows),
+            5 => self.pid_roots.traces(&self.merkle.claims.iter().map(|c| c.root).collect::<Vec<_>>(), lane, log_rows),
+            6 => self.tree_roots.traces(&self.tree_root_values, lane, log_rows),
+            7 => self.final_air.traces(&self.fold.final_value, lane, log_rows),
+            8 => self.index.traces(&self.index_words, log_rows),
+            _ => self.public_sum.traces(&self.composition.chals.beta, &self.composition.chals.rho, log_rows),
+        }
+    }
+
+    /// All tables side by side at one height (R7 layout).
+    pub fn stack(&self) -> Stacked<'_> {
+        Stacked::new(self.tables().to_vec())
+    }
+
+    /// Smallest common height that fits every table.
+    pub fn log_rows(&self) -> u32 {
+        self.table_rows().iter().max().unwrap().max(&256).next_power_of_two().trailing_zeros()
     }
 
     pub fn traces(&self, log_rows: u32) -> [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] {
-        let parts = [
-            self.composition.traces(&self.opened, log_rows),
-            self.fold.traces(&self.pairs, log_rows),
-            self.leaves.traces(&self.leaf_words, log_rows),
-            self.merkle.traces(&self.paths, log_rows),
-            self.transcript.traces(&self.duplex_log, &self.mult_ext, &self.mult_word, log_rows),
-            self.pid_roots.traces(&self.merkle.claims.iter().map(|c| c.root).collect::<Vec<_>>(), self.fold.lane, log_rows),
-            self.tree_roots.traces(&self.tree_root_values, self.fold.lane, log_rows),
-            self.final_air.traces(&self.fold.final_value, self.fold.lane, log_rows),
-            self.index.traces(&self.index_words, log_rows),
-            self.public_sum.traces(&self.composition.chals.beta, &self.composition.chals.rho, log_rows),
-        ];
+        let parts: Vec<_> = (0..10).map(|k| self.table_traces(k, log_rows)).collect();
         self.stack().traces(&parts, log_rows)
+    }
+
+    /// Tables grouped by height (power of two, at least 2^8): each group is one stack at its own
+    /// height, all groups on one bus (`stark::prove_multi`).
+    pub fn groups(&self) -> Vec<(Vec<usize>, u32)> {
+        let mut groups: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
+        for (k, r) in self.table_rows().iter().enumerate() {
+            groups.entry((*r).max(256).next_power_of_two().trailing_zeros()).or_default().push(k);
+        }
+        groups.into_iter().map(|(log, ks)| (ks, log)).collect()
+    }
+
+    fn group_stacks(&self) -> Vec<(Stacked<'_>, u32)> {
+        let all = self.tables();
+        self.groups().into_iter().map(|(ks, log)| (Stacked::new(ks.iter().map(|&k| all[k]).collect()), log)).collect()
+    }
+
+    /// Outer proof with every group at its own height.
+    pub fn prove_split(&self, outer: &StarkParams, t: &mut Transcript) -> (MultiProof, Vec<StarkParams>) {
+        let stacks = self.group_stacks();
+        let params: Vec<StarkParams> = stacks.iter().map(|(_, log)| StarkParams { log_rows: *log, ..*outer }).collect();
+        let traces: Vec<_> = self
+            .groups()
+            .iter()
+            .zip(&stacks)
+            .map(|((ks, log), (st, _))| {
+                let parts: Vec<_> = ks.iter().map(|&k| self.table_traces(k, *log)).collect();
+                st.traces(&parts, *log)
+            })
+            .collect();
+        let airs: Vec<&dyn Air> = stacks.iter().map(|(s, _)| s as &dyn Air).collect();
+        (prove_multi(&airs, &traces, self.composition.claims.len(), &params, t), params)
+    }
+
+    pub fn verify_split(&self, proof: &MultiProof, params: &[StarkParams], t: &mut Transcript) -> bool {
+        let stacks = self.group_stacks();
+        if stacks.len() != params.len() || stacks.iter().zip(params).any(|((_, log), p)| *log != p.log_rows) {
+            return false;
+        }
+        let airs: Vec<&dyn Air> = stacks.iter().map(|(s, _)| s as &dyn Air).collect();
+        verify_multi(&airs, proof, self.composition.claims.len(), params, t)
     }
 }
 
@@ -330,14 +397,27 @@ mod tests {
         build(&addrs, &old, &txs, INNER.log_rows, true).unwrap()
     }
 
+    const OUTER: StarkParams = StarkParams { log_rows: 0, log_blowup: 2, num_queries: 16 };
+
+    fn outer_t(j: usize) -> Transcript {
+        Transcript::with_mode(b"recursion", HashMode::Lane(j as u8))
+    }
+
+    /// Proves and verifies the verifier tables, each group at its own height.
     fn outer_ok<A: Air>(alg: &LaneAlgebra<A>) -> bool {
+        let j = alg.composition.lane;
+        let (proof, params) = alg.prove_split(&OUTER, &mut outer_t(j));
+        alg.verify_split(&proof, &params, &mut outer_t(j))
+    }
+
+    /// The R7 layout: every table at the common height.
+    fn outer_ok_one_height<A: Air>(alg: &LaneAlgebra<A>) -> bool {
         let p = StarkParams { log_rows: alg.log_rows(), log_blowup: 2, num_queries: 16 };
         let traces = alg.traces(p.log_rows);
         let stack = alg.stack();
         let j = alg.composition.lane;
-        let t = || Transcript::with_mode(b"recursion", HashMode::Lane(j as u8));
-        let proof = prove_air(&stack, &traces, alg.composition.claims.len(), &p, &mut t());
-        verify_air(&stack, &proof, 1 << p.log_rows, &p, &mut t())
+        let proof = prove_air(&stack, &traces, alg.composition.claims.len(), &p, &mut outer_t(j));
+        verify_air(&stack, &proof, 1 << p.log_rows, &p, &mut outer_t(j))
     }
 
     fn lane(j: usize) -> (crate::state::StateStatement, StarkProof, [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]) {
@@ -360,7 +440,7 @@ mod tests {
             let t0 = std::time::Instant::now();
             assert!(outer_ok(&alg), "lane {j}");
             if j == 0 {
-                eprintln!("lane verifier stack: 2^{} rows, width {}, prove+verify {:?}", alg.log_rows(), alg.stack().width(), t0.elapsed());
+                eprintln!("lane verifier tables: groups {:?}, prove+verify {:?}", alg.groups(), t0.elapsed());
             }
         }
     }
@@ -534,17 +614,44 @@ mod tests {
         assert!(!outer_ok(&alg), "fold rows on another index");
     }
 
-    fn outer_proof<A: Air>(alg: &LaneAlgebra<A>) -> (StarkProof, StarkParams) {
-        let p = StarkParams { log_rows: alg.log_rows(), log_blowup: 2, num_queries: 16 };
-        let traces = alg.traces(p.log_rows);
-        let j = alg.composition.lane;
-        let proof = prove_air(&alg.stack(), &traces, alg.composition.claims.len(), &p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8)));
-        (proof, p)
+    fn outer_proof<A: Air>(alg: &LaneAlgebra<A>) -> (MultiProof, Vec<StarkParams>) {
+        alg.prove_split(&OUTER, &mut outer_t(alg.composition.lane))
     }
 
-    fn outer_verifies<A: Air>(alg: &LaneAlgebra<A>, proof: &StarkProof, p: &StarkParams) -> bool {
-        let j = alg.composition.lane;
-        verify_air(&alg.stack(), proof, 1 << p.log_rows, p, &mut Transcript::with_mode(b"recursion", HashMode::Lane(j as u8)))
+    fn outer_verifies<A: Air>(alg: &LaneAlgebra<A>, proof: &MultiProof, p: &[StarkParams]) -> bool {
+        alg.verify_split(proof, p, &mut outer_t(alg.composition.lane))
+    }
+
+    #[test]
+    fn tables_of_different_heights_share_the_bus() {
+        let j = 2;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+        let alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        assert!(alg.groups().len() > 1, "the tables have different heights");
+        assert!(outer_ok_one_height(&alg), "R7 layout");
+        let (outer, p) = outer_proof(&alg);
+        assert!(outer_verifies(&alg, &outer, &p));
+        // A share moved from one table to another: the total still adds up, but the running
+        // sums of both tables break.
+        let mut forged = outer.clone();
+        let d = Extension4::new(1, 0, 0, 0);
+        forged.sums[0][j] = forged.sums[0][j].add(&d, j);
+        forged.sums[1][j] = forged.sums[1][j].sub(&d, j);
+        assert!(!outer_verifies(&alg, &forged, &p), "bus share moved between tables");
+        // A share changed alone: the total no longer matches.
+        let mut forged = outer.clone();
+        forged.sums[1][j] = forged.sums[1][j].add(&d, j);
+        assert!(!outer_verifies(&alg, &forged, &p), "bus share changed");
+        // The groups claimed at other heights.
+        let mut p2 = p.clone();
+        p2[0].log_rows += 1;
+        assert!(!outer_verifies(&alg, &outer, &p2), "group at another height");
+        // Tables of two group proofs swapped.
+        let mut forged = outer.clone();
+        forged.tables.swap(0, 1);
+        forged.sums.swap(0, 1);
+        assert!(!outer_verifies(&alg, &forged, &p), "group proofs swapped");
     }
 
     #[test]
