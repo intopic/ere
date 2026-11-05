@@ -4,7 +4,7 @@
 use num_bigint::BigUint;
 use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
 use ss_rap_p3::config::{config, Config, Val};
-use ss_rap_p3::mulmod::MulModAir;
+use ss_rap_p3::mulmod::{ByteTableAir, MulModAir, MulModAirs};
 use ss_rap_v2::uint256::{Modulus256, MulModRow};
 use std::time::Instant;
 
@@ -34,15 +34,22 @@ fn main() {
     let t0 = Instant::now();
     let trace = air.trace::<Val>(&rows);
     let tt = t0.elapsed();
-    let airs = [air];
-    let pd = ProverData::<Config>::from_airs_and_degrees(&cfg, &airs, &[log_rows]).unwrap();
-    let traces = [&trace];
-    let inst = StarkInstance::new_multiple(&airs, &traces, &[vec![]]);
+    let global = std::env::var("GLOBAL").is_ok();
+    let pad = MulModRow::generate(&0u32.into(), &0u32.into(), &p);
+    let table = ByteTableAir::trace::<Val>(&rows, n, &pad);
+    let (airs, degs, traces, pvs): (Vec<MulModAirs>, Vec<usize>, Vec<_>, Vec<Vec<Val>>) = if global {
+        (vec![MulModAirs::MulMod(air), MulModAirs::Table(ByteTableAir)], vec![log_rows, 8], vec![&trace, &table], vec![vec![], vec![]])
+    } else {
+        (vec![MulModAirs::MulMod(air)], vec![log_rows], vec![&trace], vec![vec![]])
+    };
+    let budget: usize = std::env::var("BUDGET").ok().and_then(|b| b.parse().ok()).unwrap_or(0);
+    let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![budget; airs.len()], log_blowup).unwrap();
+    let inst = StarkInstance::new_multiple(&airs, &traces, &pvs);
     let t0 = Instant::now();
     let proof = prove_batch(&cfg, &inst, &pd).unwrap();
     let pt = t0.elapsed();
     let t0 = Instant::now();
-    let ok = verify_batch(&cfg, &airs, &proof, &[vec![]], &pd.common).is_ok();
+    let ok = verify_batch(&cfg, &airs, &proof, &pvs, &pd.common).is_ok();
     println!("plonky3 MULMOD secp256k1, BabyBear lane: {n} ops, blowup {}, {queries} queries: trace {tt:.1?}, prove {pt:.2?}, verify {:.1?}, ok {ok}", 1 << log_blowup, t0.elapsed());
     println!("  per op: {:.1} us (x5 lanes ~ {:.2?} for {} ops)", pt.as_secs_f64() * 1e6 / n as f64, pt * 5, 5 * n);
 }

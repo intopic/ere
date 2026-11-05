@@ -105,13 +105,93 @@ where
         }
         // LogUp: every byte column is in [0, 256); the table side is the preprocessed byte
         // column (first 256 rows hold 0..255, the rest repeat it) with its multiplicity.
-        if std::env::var("NO_LOOKUP").is_err() {
+        if std::env::var("GLOBAL").is_ok() {
+            for j in 0..NUM_COLUMNS {
+                builder.push_interaction("byte", [c[j].clone()], 1);
+            }
+        } else if std::env::var("NO_LOOKUP").is_err() {
             for g in 0..GROUPS {
                 let mut tuples: Vec<(Vec<AB::Expr>, Count<AB::Expr>)> =
                     (g * GROUP..((g + 1) * GROUP).min(NUM_COLUMNS)).map(|j| (vec![c[j].clone()], Count::bounded(AB::Expr::ONE, 1))).collect();
                 tuples.push((vec![byte.clone()], Count::provided(-c[NUM_COLUMNS + g].clone())));
                 builder.push_local_interaction(tuples);
             }
+        }
+    }
+}
+
+/// The byte table for the global "byte" bus: preprocessed 0..255 and its multiplicity.
+#[derive(Clone, Debug)]
+pub struct ByteTableAir;
+
+impl ByteTableAir {
+    pub fn trace<F: Field>(rows: &[MulModRow], n_rows: usize, pad: &MulModRow) -> RowMajorMatrix<F> {
+        let mut m = vec![0u64; 256];
+        for i in 0..n_rows {
+            for b in rows.get(i).unwrap_or(pad).limbs() {
+                m[b as usize] += 1;
+            }
+        }
+        RowMajorMatrix::new(m.into_iter().map(F::from_u64).collect(), 1)
+    }
+}
+
+impl<F: Field> BaseAir<F> for ByteTableAir {
+    fn width(&self) -> usize {
+        1
+    }
+    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+        Some(RowMajorMatrix::new((0..256u32).map(F::from_u32).collect(), 1))
+    }
+    fn preprocessed_width(&self) -> usize {
+        1
+    }
+}
+
+impl<AB> Air<AB> for ByteTableAir
+where
+    AB: AirBuilder + PermutationAirBuilder + InteractionBuilder,
+{
+    fn eval(&self, builder: &mut AB) {
+        let m: AB::Expr = builder.main().current_slice()[0].into();
+        let t: AB::Expr = builder.preprocessed().current(0).unwrap().into();
+        builder.push_interaction("byte", [t], Count::provided(-m));
+    }
+}
+
+/// Either AIR, so both go into one batch proof.
+#[derive(Clone, Debug)]
+pub enum MulModAirs {
+    MulMod(MulModAir),
+    Table(ByteTableAir),
+}
+
+impl<F: Field> BaseAir<F> for MulModAirs {
+    fn width(&self) -> usize {
+        match self {
+            Self::MulMod(a) => <MulModAir as BaseAir<F>>::width(a),
+            Self::Table(a) => <ByteTableAir as BaseAir<F>>::width(a),
+        }
+    }
+    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+        match self {
+            Self::MulMod(a) => a.preprocessed_trace(),
+            Self::Table(a) => a.preprocessed_trace(),
+        }
+    }
+    fn preprocessed_width(&self) -> usize {
+        1
+    }
+}
+
+impl<AB> Air<AB> for MulModAirs
+where
+    AB: AirBuilder + PermutationAirBuilder + InteractionBuilder,
+{
+    fn eval(&self, builder: &mut AB) {
+        match self {
+            Self::MulMod(a) => a.eval(builder),
+            Self::Table(a) => a.eval(builder),
         }
     }
 }
