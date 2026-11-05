@@ -52,3 +52,8 @@ Secila është e shënuar me fazën ku hyn.
 | Batch inversion | 5–6× |
 | V-UMT | 5× më pak hash |
 | FRI i plotë, 5 kanale, shkallë < 2^14 | prove ~67 ms, verify ~1.3 ms, provë ~237 KiB |
+| STARK end-to-end, 1024 × MULMOD uint256 (secp256k1), 50 query | prove ~1.1 s në 4 bërthama CPU, verify ~23 ms, provë ~4.7 MiB |
+
+Prova STARK është e madhe (4.7 MiB) dhe ende në CPU. Për L1 ajo mbështillet në Groth16 (faza C), kështu që në zinxhir
+shkon vetëm një provë e vogël me kosto ~240k gas. Shpejtësia 2.5–4 s për një batch të plotë synohet në fazën B (GPU,
+një kanal për GPU).

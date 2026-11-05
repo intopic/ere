@@ -37,9 +37,9 @@ Transaksionet ─► Sequencer (soft-finality < 200 ms) ─► Batch 1000 tx ─
 |---|---|---|---|
 | 1 | Aritmetika bazë (Barrett, F⁴, batch inverse) | ✅ e testuar, `POW256` i parallogaritur (S2: 4.5× vonesë) | — |
 | 2 | Kufizimet RNS Q/R (64-bit + `uint256`) | ✅ `uint256::MulModRow`: 4 limbs 64-bit × 5 kanale, r < P, teste sulmi | ADDMOD dhe opkodet e tjera të EVM-së |
-| 3 | LogUp | ✅ `logup.rs`: shumësi të angazhuara para α, α për çdo kanal, batch inversion | Lidhja me commitment-in e gjurmës (V-UMT) në STARK |
+| 3 | LogUp | ✅ `logup.rs` + brenda STARK-ut si AIR (kolona inversesh + shumë vijuese) | — |
 | 4 | Transcript Fiat-Shamir | ✅ `transcript.rs` (Blake3) | — |
-| 5 | STARK: NTT, LDE, kompozimi | ⚠️ `ntt.rs`: NTT/LDE gati | Interpolimi i gjurmës, polinomi i kompozimit, lidhja me FRI |
+| 5 | STARK: NTT, LDE, kompozimi | ✅ `stark.rs`: provë end-to-end për batch MULMOD uint256 (gjurmë + LogUp në AIR + kuocient + FRI), teste sulmi | Opkode të tjera EVM, Keccak-256 |
 | 6 | FRI | ✅ `fri.rs`: commit, query, V-UMT për shtresë, verifikues, teste sulmi | Më shumë query për ≥ 100 bit |
 | 7 | GPU (CUDA) | ⚠️ kernel i palidhur | Host launcher, NTT batch, V-UMT Blake3 në GPU, benchmark RTX 4090 |
 | 8 | Wrapper Groth16 | ❌ | Verifikuesi STARK si qark BN254 (gnark/SP1), trusted setup real |

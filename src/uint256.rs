@@ -25,6 +25,7 @@
 //! s + r + 1 = P over Z, hence r = a*b mod P with r < P.
 
 use crate::{add_mod, fast_reduce_channel, mul_mod_channel, sub_mod, DEFAULT_RNS_CHANNELS, POW256, RNS_MODULI};
+
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -97,16 +98,6 @@ fn limb_res(bytes: &U256Bytes, i: usize, ch: usize) -> u32 {
     fast_reduce_channel(acc, ch)
 }
 
-#[inline(always)]
-fn carry_res(bytes: &[u8; CARRY_BYTES], ch: usize) -> u32 {
-    let pw = &POW256[ch];
-    let mut acc = 0u64;
-    for k in 0..CARRY_BYTES {
-        acc += (bytes[k] as u64) * (pw[k] as u64);
-    }
-    fast_reduce_channel(acc, ch)
-}
-
 impl MulModRow {
     /// Honest witness generation (this is the only place that "computes"; the circuit verifies).
     pub fn generate(a: &BigUint, b: &BigUint, p: &Modulus256) -> Self {
@@ -169,44 +160,9 @@ impl MulModRow {
 
     /// Evaluates all 11 constraints in channel `ch`. Honest rows give all zeros.
     pub fn evaluate(&self, p: &Modulus256, ch: usize) -> [u32; CONSTRAINTS_PER_CHANNEL] {
-        let m = RNS_MODULI[ch];
-        let two64 = POW256[ch][8];
-        let offset = mul_mod_channel(two64, 8, ch); // 2^67 mod m
-        let res = |x: &U256Bytes| -> [u32; LIMBS64] { std::array::from_fn(|i| limb_res(x, i, ch)) };
-        let (a, b, q, r, s, pl) = (res(&self.a), res(&self.b), res(&self.q), res(&self.r), res(&self.s), res(&p.bytes));
-        let carry = |k: usize| -> u32 { sub_mod(carry_res(&self.c[k], ch), offset, m) };
-
-        let mut out = [0u32; CONSTRAINTS_PER_CHANNEL];
-        for k in 0..PRODUCT_COLUMNS {
-            let mut v = if k > 0 { carry(k - 1) } else { 0 };
-            for i in 0..LIMBS64 {
-                if k >= i && k - i < LIMBS64 {
-                    v = add_mod(v, mul_mod_channel(a[i], b[k - i], ch), m);
-                    v = sub_mod(v, mul_mod_channel(q[i], pl[k - i], ch), m);
-                }
-            }
-            if k < LIMBS64 {
-                v = sub_mod(v, r[k], m);
-            }
-            if k < PRODUCT_COLUMNS - 1 {
-                v = sub_mod(v, mul_mod_channel(carry(k), two64, ch), m);
-            }
-            out[k] = v;
-        }
-        for k in 0..LIMBS64 {
-            let mut v = add_mod(s[k], r[k], m);
-            if k == 0 {
-                v = add_mod(v, 1, m);
-            } else {
-                v = add_mod(v, self.d[k - 1] as u32, m);
-            }
-            v = sub_mod(v, pl[k], m);
-            if k < LIMBS64 - 1 {
-                v = sub_mod(v, mul_mod_channel(self.d[k] as u32, two64, ch), m);
-            }
-            out[PRODUCT_COLUMNS + k] = v;
-        }
-        out
+        let cols = self.limbs();
+        let pc = p_columns(p, ch);
+        eval_columns(&cols, &pc, ch)
     }
 
     pub fn is_satisfied(&self, p: &Modulus256) -> bool {
@@ -225,6 +181,72 @@ impl MulModRow {
         v.extend(self.d.iter().map(|&b| b as u32));
         v
     }
+}
+
+pub const NUM_COLUMNS: usize = 5 * 32 + (PRODUCT_COLUMNS - 1) * CARRY_BYTES + (LIMBS64 - 1); // 217
+const COL_A: usize = 0;
+const COL_B: usize = 32;
+const COL_Q: usize = 64;
+const COL_R: usize = 96;
+const COL_S: usize = 128;
+const COL_C: usize = 160;
+const COL_D: usize = COL_C + (PRODUCT_COLUMNS - 1) * CARRY_BYTES;
+
+/// Residues of the 4 limbs of P in channel `ch` (public constants of the AIR).
+pub fn p_columns(p: &Modulus256, ch: usize) -> [u32; LIMBS64] {
+    std::array::from_fn(|i| limb_res(&p.bytes, i, ch))
+}
+
+/// The MULMOD AIR as polynomial constraints over column values in F_{m_ch}. `cols` holds the
+/// 217 byte columns in the order of `MulModRow::limbs()`. On byte values this is exactly
+/// `MulModRow::evaluate`; the STARK evaluates it on low-degree extensions of the columns.
+pub fn eval_columns(cols: &[u32], pl: &[u32; LIMBS64], ch: usize) -> [u32; CONSTRAINTS_PER_CHANNEL] {
+    let m = RNS_MODULI[ch];
+    let pw = &POW256[ch];
+    let lin = |start: usize, len: usize| -> u32 {
+        let mut acc = 0u32;
+        for k in 0..len {
+            acc = add_mod(acc, mul_mod_channel(cols[start + k], pw[k], ch), m);
+        }
+        acc
+    };
+    let limb = |base: usize, i: usize| lin(base + 8 * i, 8);
+    let two64 = pw[8];
+    let offset = mul_mod_channel(two64, 8, ch);
+    let carry = |k: usize| sub_mod(lin(COL_C + CARRY_BYTES * k, CARRY_BYTES), offset, m);
+    let a: [u32; LIMBS64] = std::array::from_fn(|i| limb(COL_A, i));
+    let b: [u32; LIMBS64] = std::array::from_fn(|i| limb(COL_B, i));
+    let q: [u32; LIMBS64] = std::array::from_fn(|i| limb(COL_Q, i));
+    let r: [u32; LIMBS64] = std::array::from_fn(|i| limb(COL_R, i));
+    let s: [u32; LIMBS64] = std::array::from_fn(|i| limb(COL_S, i));
+
+    let mut out = [0u32; CONSTRAINTS_PER_CHANNEL];
+    for k in 0..PRODUCT_COLUMNS {
+        let mut v = if k > 0 { carry(k - 1) } else { 0 };
+        for i in 0..LIMBS64 {
+            if k >= i && k - i < LIMBS64 {
+                v = add_mod(v, mul_mod_channel(a[i], b[k - i], ch), m);
+                v = sub_mod(v, mul_mod_channel(q[i], pl[k - i], ch), m);
+            }
+        }
+        if k < LIMBS64 {
+            v = sub_mod(v, r[k], m);
+        }
+        if k < PRODUCT_COLUMNS - 1 {
+            v = sub_mod(v, mul_mod_channel(carry(k), two64, ch), m);
+        }
+        out[k] = v;
+    }
+    for k in 0..LIMBS64 {
+        let mut v = add_mod(s[k], r[k], m);
+        v = add_mod(v, if k == 0 { 1 } else { cols[COL_D + k - 1] }, m);
+        v = sub_mod(v, pl[k], m);
+        if k < LIMBS64 - 1 {
+            v = sub_mod(v, mul_mod_channel(cols[COL_D + k], two64, ch), m);
+        }
+        out[PRODUCT_COLUMNS + k] = v;
+    }
+    out
 }
 
 /// Re-derives every product-column carry for a (possibly forged) a, b, q, r so that the product

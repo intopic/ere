@@ -13,6 +13,7 @@ pub mod fri;
 pub mod logup;
 pub mod ntt;
 pub mod rns256;
+pub mod stark;
 pub mod transcript;
 pub mod uint256;
 

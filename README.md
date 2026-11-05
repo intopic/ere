@@ -48,6 +48,7 @@ cargo test --release
 
 ```bash
 cargo run --release --example bench_pdf_strategy
+cargo run --release --example bench_stark_mulmod   # provë STARK end-to-end për 1024 MULMOD
 cargo run --release --example bench_rns256
 forge build   # kontrata (kërkon Foundry)
 ```

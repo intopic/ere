@@ -21,8 +21,8 @@ use crate::transcript::Transcript;
 use crate::{batch_inverse_channel, mod_inv_single, mul_mod_channel, Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
 use blake3::Hasher;
 
-type Hash = [u8; 32];
-type Layer = [Vec<Extension4>; DEFAULT_RNS_CHANNELS];
+pub type Hash = [u8; 32];
+pub type Layer = [Vec<Extension4>; DEFAULT_RNS_CHANNELS];
 type Pair = [[Extension4; 2]; DEFAULT_RNS_CHANNELS];
 
 #[derive(Clone, Copy, Debug)]
@@ -71,22 +71,25 @@ fn leaf_hash(pair: &Pair) -> Hash {
     *h.finalize().as_bytes()
 }
 
-fn node_hash(l: &Hash, r: &Hash) -> Hash {
+pub fn node_hash(l: &Hash, r: &Hash) -> Hash {
     let mut h = Hasher::new();
     h.update(l);
     h.update(r);
     *h.finalize().as_bytes()
 }
 
-/// V-UMT for one FRI layer. levels[0] = leaves, last = [root].
-struct Tree {
+/// Binary Blake3 Merkle tree (V-UMT when a leaf packs all 5 channels). levels[0] = leaves.
+pub struct Tree {
     levels: Vec<Vec<Hash>>,
 }
 
 impl Tree {
     fn build(layer: &Layer) -> Self {
         let half = layer[0].len() / 2;
-        let leaves: Vec<Hash> = (0..half).map(|j| leaf_hash(&pair_at(layer, j))).collect();
+        Self::from_leaves((0..half).map(|j| leaf_hash(&pair_at(layer, j))).collect())
+    }
+    pub fn from_leaves(leaves: Vec<Hash>) -> Self {
+        assert!(leaves.len().is_power_of_two());
         let mut levels = vec![leaves];
         while levels.last().unwrap().len() > 1 {
             let prev = levels.last().unwrap();
@@ -94,10 +97,10 @@ impl Tree {
         }
         Self { levels }
     }
-    fn root(&self) -> Hash {
+    pub fn root(&self) -> Hash {
         self.levels.last().unwrap()[0]
     }
-    fn path(&self, mut idx: usize) -> Vec<Hash> {
+    pub fn path(&self, mut idx: usize) -> Vec<Hash> {
         let mut out = Vec::new();
         for lvl in &self.levels[..self.levels.len() - 1] {
             out.push(lvl[idx ^ 1]);
@@ -107,7 +110,7 @@ impl Tree {
     }
 }
 
-fn verify_path(root: &Hash, leaf: Hash, mut idx: usize, path: &[Hash]) -> bool {
+pub fn verify_path(root: &Hash, leaf: Hash, mut idx: usize, path: &[Hash]) -> bool {
     let mut h = leaf;
     for sib in path {
         h = if idx & 1 == 0 { node_hash(&h, sib) } else { node_hash(sib, &h) };
@@ -128,13 +131,13 @@ fn fold_value(f0: Extension4, f1: Extension4, alpha: &Extension4, inv_x: u32, ch
     even.add(&alpha.mul(&odd, ch), ch)
 }
 
-fn fold_layer(layer: &Layer, alphas: &[Extension4; DEFAULT_RNS_CHANNELS]) -> Layer {
+fn fold_layer(layer: &Layer, alphas: &[Extension4; DEFAULT_RNS_CHANNELS], shift: &[u32; DEFAULT_RNS_CHANNELS]) -> Layer {
     let n = layer[0].len();
     let half = n / 2;
     std::array::from_fn(|ch| {
         let w = root_of_unity(n, ch);
         let mut xs = Vec::with_capacity(half);
-        let mut x = 1u32;
+        let mut x = shift[ch];
         for _ in 0..half {
             xs.push(x);
             x = mul_mod_channel(x, w, ch);
@@ -160,7 +163,14 @@ pub fn prove(coeffs: &[Vec<u32>; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &
 
 /// Same as `prove`, starting from evaluations on the domain of size `domain_size()`.
 pub fn prove_from_evaluations(initial: Layer, params: &FriParams, t: &mut Transcript) -> FriProof {
+    prove_coset(initial, &[1; DEFAULT_RNS_CHANNELS], params, t).0
+}
+
+/// FRI on the coset shift * <w> (per channel). Returns the proof and the layer-0 query indices
+/// (each index i opens positions i and i + n/2), so that a STARK can open its trace there.
+pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> (FriProof, Vec<usize>) {
     assert_eq!(initial[0].len(), params.domain_size());
+    let mut shift = *shift;
     t.absorb(b"fri/params", &[params.log_degree as u8, params.log_blowup as u8, params.num_queries as u8]);
     let mut layers = vec![initial];
     let mut trees = Vec::new();
@@ -171,16 +181,18 @@ pub fn prove_from_evaluations(initial: Layer, params: &FriParams, t: &mut Transc
         roots.push(tree.root());
         trees.push(tree);
         let alphas = t.challenge_ext4_all(b"fri/alpha");
-        let next = fold_layer(layers.last().unwrap(), &alphas);
+        let next = fold_layer(layers.last().unwrap(), &alphas, &shift);
         layers.push(next);
+        shift = std::array::from_fn(|ch| mul_mod_channel(shift[ch], shift[ch], ch));
     }
     let final_layer = layers.pop().unwrap();
     absorb_final(t, &final_layer);
 
     let half0 = params.domain_size() / 2;
-    let queries = (0..params.num_queries)
-        .map(|_| {
-            let i = t.challenge_index(b"fri/query", half0);
+    let indices: Vec<usize> = (0..params.num_queries).map(|_| t.challenge_index(b"fri/query", half0)).collect();
+    let queries = indices
+        .iter()
+        .map(|&i| {
             layers
                 .iter()
                 .zip(&trees)
@@ -191,7 +203,7 @@ pub fn prove_from_evaluations(initial: Layer, params: &FriParams, t: &mut Transc
                 .collect()
         })
         .collect();
-    FriProof { layer_roots: roots, final_layer, queries }
+    (FriProof { layer_roots: roots, final_layer, queries }, indices)
 }
 
 fn absorb_final(t: &mut Transcript, final_layer: &Layer) {
@@ -201,14 +213,23 @@ fn absorb_final(t: &mut Transcript, final_layer: &Layer) {
 
 /// Verifier. Returns true iff every query is consistent with a polynomial of degree < 2^log_degree.
 pub fn verify(proof: &FriProof, params: &FriParams, t: &mut Transcript) -> bool {
+    verify_coset(proof, &[1; DEFAULT_RNS_CHANNELS], params, t).is_some()
+}
+
+/// Coset verifier. On success returns the layer-0 query indices.
+pub fn verify_coset(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> Option<Vec<usize>> {
+    verify_inner(proof, shift0, params, t)
+}
+
+fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: &FriParams, t: &mut Transcript) -> Option<Vec<usize>> {
     let rounds = params.log_degree as usize;
     let n0 = params.domain_size();
     let blowup = 1usize << params.log_blowup;
     if proof.layer_roots.len() != rounds || proof.queries.len() != params.num_queries {
-        return false;
+        return None;
     }
     if proof.final_layer.iter().any(|v| v.len() != blowup || v.iter().any(|e| *e != v[0])) {
-        return false; // last layer must be a constant
+        return None; // last layer must be a constant
     }
     t.absorb(b"fri/params", &[params.log_degree as u8, params.log_blowup as u8, params.num_queries as u8]);
     let mut alphas = Vec::with_capacity(rounds);
@@ -218,22 +239,23 @@ pub fn verify(proof: &FriProof, params: &FriParams, t: &mut Transcript) -> bool 
     }
     absorb_final(t, &proof.final_layer);
 
-    for q in &proof.queries {
-        let i = t.challenge_index(b"fri/query", n0 / 2);
+    let indices: Vec<usize> = (0..params.num_queries).map(|_| t.challenge_index(b"fri/query", n0 / 2)).collect();
+    for (q, &i) in proof.queries.iter().zip(&indices) {
         if q.len() != rounds {
-            return false;
+            return None;
         }
         let mut n = n0;
+        let mut shift = *shift0;
         for (l, open) in q.iter().enumerate() {
             let half = n / 2;
             let j = i % half;
             if open.path.len() != half.trailing_zeros() as usize
                 || !verify_path(&proof.layer_roots[l], leaf_hash(&open.pair), j, &open.path)
             {
-                return false;
+                return None;
             }
             for ch in 0..DEFAULT_RNS_CHANNELS {
-                let x = pow(root_of_unity(n, ch), j as u64, ch);
+                let x = mul_mod_channel(shift[ch], pow(root_of_unity(n, ch), j as u64, ch), ch);
                 let inv_x = mod_inv_single(x, RNS_MODULI[ch]);
                 let folded = fold_value(open.pair[ch][0], open.pair[ch][1], &alphas[l][ch], inv_x, ch);
                 let expected = if l + 1 < rounds {
@@ -243,13 +265,14 @@ pub fn verify(proof: &FriProof, params: &FriParams, t: &mut Transcript) -> bool 
                     proof.final_layer[ch][j]
                 };
                 if folded != expected {
-                    return false;
+                    return None;
                 }
             }
             n = half;
+            shift = std::array::from_fn(|ch| mul_mod_channel(shift[ch], shift[ch], ch));
         }
     }
-    true
+    Some(indices)
 }
 
 fn pow(mut b: u32, mut e: u64, ch: usize) -> u32 {
