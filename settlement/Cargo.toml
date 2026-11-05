@@ -7,13 +7,15 @@ description = "SS-RAP v2 Phase C: L1 settlement (Groth16 over BN254), sequencer 
 [dependencies]
 ss_rap_v2 = { path = ".." }
 ark-bn254 = "0.5"
-ark-ec = "0.5"
-ark-ff = "0.5"
-ark-groth16 = "0.5"
+ark-ec = { version = "0.5", features = ["parallel"] }
+ark-ff = { version = "0.5", features = ["parallel"] }
+ark-groth16 = { version = "0.5", features = ["parallel"] }
 ark-relations = "0.5"
 ark-snark = "0.5"
-ark-std = "0.5"
+ark-std = { version = "0.5", features = ["parallel"] }
 ark-serialize = "0.5"
+ark-r1cs-std = "0.5"
+ark-crypto-primitives = { version = "0.5", default-features = false, features = ["sponge", "r1cs"] }
 tiny-keccak = { version = "2", features = ["keccak"] }
 num-bigint = "0.4"
 rand_chacha = "0.3"

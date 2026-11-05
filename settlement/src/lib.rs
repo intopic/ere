@@ -11,3 +11,4 @@ pub mod groth16;
 pub mod pipeline;
 pub mod public_input;
 pub mod sequencer;
+pub mod wrapper;
