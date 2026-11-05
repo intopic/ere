@@ -65,3 +65,28 @@ aritmetikën e F_j direkt, por jo atë të fushave të tjera. Prandaj:
 
 Deri sa të mbarojë R8, kontrata pranon provën Groth16 të qarkut DEV. STARK-u verifikohet nga aggregator-i.
 Ky kufizim është shkruar edhe te `settlement/src/groth16.rs`.
+
+## Matja me madhësi reale (`cargo run --release --example bench_recursion -- 50 2`)
+
+Prova e brendshme: 1000 tx, 2^8 rreshta për korsi, blowup 4, 50 query, një korsi (Poseidon2 i korsisë), 4 bërthama CPU.
+
+| Hapi | Koha |
+|---|---|
+| Prova e brendshme e një korsie | ~0.62 s (484 KiB) |
+| Riluajtja + dëshmitari | ~0.11 s |
+| Prova e jashtme (stack 2^14 × 4013) | ~100 s (1.3 MiB) |
+| Verifikimi i jashtëm | ~0.22 s |
+
+| Tabela | Rreshta | Kolona |
+|---|---|---|
+| composition | 100 | 1902 |
+| fri fold | 400 | 37 |
+| leaf hash | 8000 | 629 |
+| merkle | 8200 | 637 |
+| transcript | 43 | 624 |
+| pid roots | 1000 | 12 |
+| index | 50 | 52 |
+| public sum | 656 | 88 |
+
+Qelizat e përdorura janë 10.6 M, të mbushura 65.7 M (6.2×): lartësia e përbashkët është humbja kryesore. Nga qelizat
+e përdorura, 97% janë hash-et (gjethet e hapura dhe shtigjet Merkle).
