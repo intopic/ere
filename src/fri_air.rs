@@ -22,7 +22,7 @@
 //! query are consecutive (transition constraints on q and l), so the bus fixes the whole chain.
 //! In R7 the alphas and indices come from the sponge AIR instead of the public claim.
 //!
-//! Every constraint has degree <= 2; width 36, 28 constraints.
+//! Every constraint has degree <= 2; width 37, 29 constraints.
 //!
 //! In a stack (R7) the layer-0 pair of every query is received from the composition AIR
 //! (`link_layer0`), so the values FRI folds are the ones the composition was checked on.
@@ -48,8 +48,9 @@ const AL: usize = 20;
 const D: usize = 24;
 const OUT: usize = 28;
 const FIN: usize = 32;
-pub const COLS: usize = 36;
-pub const NUM_CONSTRAINTS: usize = 28;
+const KL: usize = 36;
+pub const COLS: usize = 37;
+pub const NUM_CONSTRAINTS: usize = 29;
 const TAG: u32 = 8;
 
 /// The public claim: lane j's FRI verifier view.
@@ -71,6 +72,10 @@ pub struct FriFoldAir {
     /// `leaf_base + q * rounds + l`.
     pub link_leaves: bool,
     pub leaf_base: u32,
+    /// Full recursion mode (R7.2d): the folding challenge of layer l is the extension challenge
+    /// of transcript permutation `chal_links[l]` (bus `transcript_air::TAG_EXT`) and the final
+    /// value comes from `link_air::FinalAir`; neither is public.
+    pub chal_links: Option<Vec<u32>>,
 }
 
 const FRI_LEAF_TAG: &[u8] = b"SS-RAP/v2/fri-leaf";
@@ -111,16 +116,26 @@ impl FriFoldAir {
         let last = l + 1 == self.rounds();
         let fin = if last { self.final_value } else { Extension4::ZERO };
         let mut v = vec![q as u32, l as u32, !last as u32, (l == 0) as u32, self.bit(self.indices[q], l)];
-        v.extend(self.alphas[l].c);
-        v.extend(fin.c);
+        match &self.chal_links {
+            Some(ks) => v.push(ks[l]),
+            None => {
+                v.extend(self.alphas[l].c);
+                v.extend(fin.c);
+            }
+        }
         v.push(if l == 0 { self.x0(self.indices[q]) } else { 0 });
         v
     }
 
-    fn row_tuple(row: &[u32]) -> Vec<u32> {
+    fn row_tuple(&self, row: &[u32]) -> Vec<u32> {
         let mut v = vec![row[Q], row[L], row[CONT], row[FIRST], row[B]];
-        v.extend_from_slice(&row[AL..AL + 4]);
-        v.extend_from_slice(&row[FIN..FIN + 4]);
+        match &self.chal_links {
+            Some(_) => v.push(row[KL]),
+            None => {
+                v.extend_from_slice(&row[AL..AL + 4]);
+                v.extend_from_slice(&row[FIN..FIN + 4]);
+            }
+        }
         v.push(row[XZ]);
         v
     }
@@ -173,6 +188,9 @@ impl FriFoldAir {
                 if last {
                     put(&mut r, FIN, &self.final_value);
                 }
+                if let Some(ks) = &self.chal_links {
+                    r[KL] = ks[l];
+                }
                 rows.push(r);
                 x = rows[rows.len() - 1][SX]; // x_{l+1} = (-1)^b x_l^2
             }
@@ -218,6 +236,7 @@ impl Air for FriFoldAir {
         for c in [ACT, CONT, FIRST, B] {
             out.push(mul(cur[c], sub(cur[c], 1)));
         }
+        out.push(mul(cur[CONT], sub(1, cur[ACT]))); // continues only on active rows
         out.push(sub(cur[SEL], mul(cur[CONT], cur[B])));
         out.push(sub(mul(cur[X], cur[INV]), 1));
         out.push(sub(cur[X2], mul(cur[X], cur[X])));
@@ -240,15 +259,22 @@ impl Air for FriFoldAir {
         debug_assert_eq!(out.len() - start, NUM_CONSTRAINTS);
     }
     fn num_bus(&self) -> usize {
-        5
+        7
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         if ch != self.lane {
-            out.extend([BusTerm { den: c.beta, weight: 0 }; 5]);
+            out.extend([BusTerm { den: c.beta, weight: 0 }; 7]);
             return;
         }
         let m = RNS_MODULI[ch];
-        out.push(BusTerm { den: c.fingerprint(TAG, &Self::row_tuple(cur), ch), weight: sub_mod(0, cur[ACT], m) });
+        out.push(BusTerm { den: c.fingerprint(TAG, &self.row_tuple(cur), ch), weight: sub_mod(0, cur[ACT], m) });
+        // recursion mode: alpha from the transcript, the final value from the final-layer table
+        let on = self.chal_links.is_some();
+        out.push(BusTerm {
+            den: c.fingerprint(crate::transcript_air::TAG_EXT, &crate::transcript_air::ext_tuple(cur[KL], &cur[AL..AL + 4]), ch),
+            weight: if on { cur[ACT] } else { 0 },
+        });
+        out.push(BusTerm { den: c.fingerprint(crate::link_air::TAG_FIN, &cur[FIN..FIN + 4], ch), weight: if on { sub_mod(cur[ACT], cur[CONT], m) } else { 0 } });
         let w = if self.link_layer0 { cur[FIRST] } else { 0 };
         let mut v0 = vec![cur[Q], 0, cur[X]];
         v0.extend_from_slice(&cur[F0..F0 + 4]);
@@ -323,6 +349,7 @@ mod tests {
             link_layer0: false,
             link_leaves: false,
             leaf_base: 0,
+            chal_links: None,
         };
         let pairs = proof.queries.iter().map(|q| q.iter().map(|o| o.pair[j]).collect()).collect();
         (air, pairs, proof)

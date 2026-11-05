@@ -20,6 +20,7 @@ pub mod fri;
 pub mod fri_air;
 pub mod hash;
 pub mod leaf_air;
+pub mod link_air;
 pub mod logup;
 pub mod multi_air;
 pub mod merkle_air;
@@ -31,6 +32,7 @@ pub mod rns256;
 pub mod sponge_air;
 pub mod stark;
 pub mod state;
+pub mod transcript_air;
 pub mod transcript;
 pub mod uint256;
 

@@ -9,14 +9,23 @@
 //!     trees, at x and at the next row's point). Only the roots and positions stay public.
 //!   - R7.2c: FRI fold rows -> leaf hashes -> Merkle paths: every pair FRI folds is authenticated
 //!     against its layer root.
+//!   - R7.2d: the transcript runs inside the stack (`transcript_air`): every path's root and the
+//!     final FRI layer are written into the absorbed blocks (`link_air`), and the composition
+//!     and fold tables read alpha, beta, rho, gamma, delta and the FRI alphas from its outputs.
+//!     Public: the inner statement, the transcript's public words, positions, S/N (R7.2f) and
+//!     the query indices (R7.2e).
 
 use crate::composition_air::{self, CompositionAir};
 use crate::fri_air::FriFoldAir;
 use crate::hash::hash_to_words;
 use crate::leaf_air::{LeafHashAir, LeafSpec};
+use crate::link_air::{FinalAir, PidRootAir, TreeRootAir, TreeSpec};
+use crate::transcript::Transcript;
+use crate::transcript_air::TranscriptAir;
 use crate::merkle_air::{Digest, MerkleAir, PathClaim};
 use crate::multi_air::Stacked;
-use crate::stark::{shift, Air, StarkParams, StarkProof, StarkView};
+use crate::stark::{shift, verify_air_view, Air, StarkParams, StarkProof, StarkView};
+use crate::hash::HashMode;
 use crate::{Extension4, DEFAULT_RNS_CHANNELS};
 
 /// Witness of the FRI fold table: pairs[q][l] of lane `j`.
@@ -36,6 +45,7 @@ pub fn fold_air(proof: &StarkProof, view: &StarkView, params: &StarkParams, j: u
         link_layer0: true,
         link_leaves: true,
         leaf_base: 0,
+        chal_links: None,
     }
 }
 
@@ -49,10 +59,24 @@ pub struct LaneAlgebra<'a, A: Air> {
     pub pairs: Vec<Vec<[Extension4; 2]>>,
     pub leaf_words: Vec<Vec<u32>>,
     pub paths: Vec<Vec<Digest>>,
+    pub transcript: TranscriptAir,
+    pub duplex_log: Vec<([u32; 8], [u32; crate::poseidon2::WIDTH])>,
+    pub mult_ext: Vec<u32>,
+    pub pid_roots: PidRootAir,
+    pub tree_roots: TreeRootAir,
+    pub tree_root_values: Vec<Digest>,
+    pub final_air: FinalAir,
+    pub view: StarkView,
 }
 
 impl<'a, A: Air> LaneAlgebra<'a, A> {
-    pub fn new(inner: &'a A, proof: &StarkProof, view: &StarkView, params: StarkParams) -> Self {
+    /// Replays the inner verifier's transcript (`label`, the inner proof's lane) and builds every
+    /// table with its witness. Panics if the inner proof does not verify natively.
+    pub fn new(inner: &'a A, proof: &StarkProof, params: StarkParams, label: &[u8]) -> Self {
+        let j = (0..DEFAULT_RNS_CHANNELS).find(|&ch| !proof.openings[0][0].main[ch].is_empty()).expect("per-lane proof");
+        let mut t = Transcript::with_mode(label, HashMode::Lane(j as u8));
+        let view = verify_air_view(inner, proof, usize::MAX, &params, &mut t).expect("inner proof verifies");
+        let view = &view;
         let (mut composition, opened) = composition_air::from_proof(inner, proof, view, params);
         composition.link_fri = true;
         composition.link_leaves = true;
@@ -99,26 +123,87 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
                 words.push(w);
             }
         }
+        // ---- transcript schedule (R7.2d)
+        let d = t.poseidon2_duplex().expect("Poseidon2 transcript");
+        let ext_k = |c: usize| -> u32 {
+            let k = d.squeezed_at[8 * c].0;
+            assert!(d.squeezed_at[8 * c..8 * c + 8].iter().enumerate().all(|(i, &(kk, p))| kk == k && p == i), "challenge not aligned to one permutation");
+            k as u32
+        };
+        composition.chal_links = Some(std::array::from_fn(ext_k));
+        fold.chal_links = Some((0..rounds).map(|l| ext_k(5 + l)).collect());
+        let mut mult_ext = vec![0u32; d.log.len()];
+        for c in 0..5 {
+            mult_ext[ext_k(c) as usize] += composition.claims.len() as u32;
+        }
+        for l in 0..rounds {
+            mult_ext[ext_k(5 + l) as usize] += view.indices.len() as u32;
+        }
+        // trees: 0 main, 1 aux, 2 quotient, 3 + l FRI layer l; digests absorbed in that order
+        assert_eq!(t.digests_at.len(), 3 + rounds);
+        let tree_of_pid: Vec<u32> = (0..claims.len())
+            .map(|pid| if pid < fold.leaf_base as usize { (pid % composition_air::LEAVES_PER_ROW % 3) as u32 } else { 3 + ((pid - fold.leaf_base as usize) % rounds) as u32 })
+            .collect();
+        let tree_roots_v: Vec<Digest> = (0..3 + rounds)
+            .map(|tr| match tr {
+                0 => hash_to_words(&proof.main_root),
+                1 => hash_to_words(&proof.aux_root),
+                2 => hash_to_words(&proof.q_root),
+                _ => hash_to_words(&proof.fri.layer_roots[tr - 3]),
+            })
+            .collect();
+        let trees = (0..3 + rounds)
+            .map(|tr| TreeSpec {
+                tree: tr as u32,
+                paths: tree_of_pid.iter().filter(|&&x| x == tr as u32).count() as u32,
+                at: std::array::from_fn(|w| {
+                    let (k, p) = d.absorbed_at[t.digests_at[tr] + w];
+                    (k as u32, p as u32)
+                }),
+            })
+            .collect::<Vec<_>>();
+        let pid_roots = PidRootAir { paths: claims.iter().enumerate().map(|(pid, c)| (pid as u32, c.depth, tree_of_pid[pid])).collect() };
+        assert_eq!(t.words_at.len(), 1, "one absorbed word message: the final FRI layer");
+        let (start, len) = t.words_at[0];
+        let final_air = FinalAir { queries: view.indices.len() as u32, at: (0..len).map(|w| (d.absorbed_at[start + w].0 as u32, d.absorbed_at[start + w].1 as u32)).collect() };
+        let mut linked: std::collections::HashSet<(u32, u32)> = trees.iter().flat_map(|t| t.at).collect();
+        linked.extend(final_air.at.iter().copied());
+        let public_words = d
+            .log
+            .iter()
+            .enumerate()
+            .flat_map(|(k, (block, _))| (0..8).map(move |p| (k as u32, p as u32, block[p])))
+            .filter(|&(k, p, _)| !linked.contains(&(k, p)))
+            .collect();
+        let transcript = TranscriptAir { lane: j, perms: d.log.len(), public_words };
         Self {
             fold,
             pairs,
             leaves: LeafHashAir { lane: j, leaves: specs, public_words: None, public_digests: None },
-            merkle: MerkleAir { claims, lane: j, link_leaves: true },
+            merkle: MerkleAir { claims, lane: j, link_leaves: true, link_roots: true },
             composition,
             opened,
             leaf_words: words,
             paths,
+            duplex_log: d.log.clone(),
+            transcript,
+            mult_ext,
+            pid_roots,
+            tree_roots: TreeRootAir { trees },
+            tree_root_values: tree_roots_v,
+            final_air,
+            view: view.clone(),
         }
     }
 
     pub fn stack(&self) -> Stacked<'_> {
-        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle])
+        Stacked::new(vec![&self.composition, &self.fold, &self.leaves, &self.merkle, &self.transcript, &self.pid_roots, &self.tree_roots, &self.final_air])
     }
 
     /// Smallest stack height that fits every table.
     pub fn log_rows(&self) -> u32 {
         let merkle_rows: usize = self.merkle.claims.iter().map(|c| c.depth as usize).sum();
-        let need = [self.opened.len() + 1, self.pairs.len() * self.fold.alphas.len() + 1, self.leaves.rows_needed() + 1, merkle_rows + 1, 256];
+        let need = [self.opened.len() + 1, self.pairs.len() * self.fold.alphas.len() + 1, self.leaves.rows_needed() + 1, merkle_rows + 1, self.transcript.perms + 1, self.merkle.claims.len() + 1, 256];
         need.iter().max().unwrap().next_power_of_two().trailing_zeros()
     }
 
@@ -128,6 +213,10 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
             self.fold.traces(&self.pairs, log_rows),
             self.leaves.traces(&self.leaf_words, log_rows),
             self.merkle.traces(&self.paths, log_rows),
+            self.transcript.traces(&self.duplex_log, &self.mult_ext, &vec![[0; 4]; self.duplex_log.len()], log_rows),
+            self.pid_roots.traces(&self.merkle.claims.iter().map(|c| c.root).collect::<Vec<_>>(), self.fold.lane, log_rows),
+            self.tree_roots.traces(&self.tree_root_values, self.fold.lane, log_rows),
+            self.final_air.traces(&self.fold.final_value, self.fold.lane, log_rows),
         ];
         self.stack().traces(&parts, log_rows)
     }
@@ -137,7 +226,7 @@ impl<'a, A: Air> LaneAlgebra<'a, A> {
 mod tests {
     use super::*;
     use crate::hash::HashMode;
-    use crate::stark::{prove_air, prove_air_lanes, verify_air, verify_air_view};
+    use crate::stark::{prove_air, prove_air_lanes, verify_air};
     use crate::transcript::Transcript;
 
     const INNER: StarkParams = StarkParams { log_rows: 8, log_blowup: 2, num_queries: 4 };
@@ -177,9 +266,6 @@ mod tests {
         (st, proof, traces)
     }
 
-    fn view_of<A: Air>(inner: &A, proof: &StarkProof, j: usize) -> StarkView {
-        verify_air_view(inner, proof, 5 << INNER.log_rows, &INNER, &mut Transcript::with_mode(b"inner", HashMode::Lane(j as u8))).unwrap()
-    }
 
     #[test]
     fn linked_verifier_tables_accept_honest_proofs_in_every_lane() {
@@ -187,7 +273,7 @@ mod tests {
         let inner = crate::state::StateAir { st: &st };
         let proofs = prove_air_lanes(&inner, &traces, st.num_txs(), &INNER, b"inner");
         for j in 0..DEFAULT_RNS_CHANNELS {
-            let alg = LaneAlgebra::new(&inner, &proofs[j], &view_of(&inner, &proofs[j], j), INNER);
+            let alg = LaneAlgebra::new(&inner, &proofs[j], INNER, b"inner");
             let t0 = std::time::Instant::now();
             assert!(outer_ok(&alg), "lane {j}");
             if j == 0 {
@@ -201,14 +287,13 @@ mod tests {
         let j = 2;
         let (st, proof, _) = lane(j);
         let inner = crate::state::StateAir { st: &st };
-        let view = view_of(&inner, &proof, j);
         // Replace query 1's layer-0 pair by another pair that folds to the same value, so the
         // FRI chain alone still holds: f0 += (1 - a/x) c, f1 -= (1 + a/x) c.
-        let alg0 = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let alg0 = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         let x = alg0.fold.traces(&alg0.pairs, 8)[j][alg0.fold.alphas.len()][7]; // X of row (q = 1, l = 0)
         let a_over_x = alg0.fold.alphas[0].mul_scalar(crate::mod_inv_single(x, crate::RNS_MODULI[j]), j);
         let c = Extension4::new(5, 6, 7, 8);
-        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         alg.pairs[1][0][0] = alg.pairs[1][0][0].add(&Extension4::ONE.sub(&a_over_x, j).mul(&c, j), j);
         alg.pairs[1][0][1] = alg.pairs[1][0][1].sub(&Extension4::ONE.add(&a_over_x, j).mul(&c, j), j);
         assert!(!outer_ok(&alg), "fold of another layer-0 pair");
@@ -221,6 +306,7 @@ mod tests {
     fn fold_alone_ok<A: Air>(alg: &mut LaneAlgebra<A>) -> bool {
         alg.fold.link_layer0 = false;
         alg.fold.link_leaves = false;
+        alg.fold.chal_links = None;
         let p = StarkParams { log_rows: 8, log_blowup: 2, num_queries: 16 };
         let j = alg.fold.lane;
         let traces = alg.fold.traces(&alg.pairs, p.log_rows);
@@ -237,8 +323,7 @@ mod tests {
         let j = 1;
         let (st, proof, _) = lane(j);
         let inner = crate::state::StateAir { st: &st };
-        let view = view_of(&inner, &proof, j);
-        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         let rounds = alg.fold.alphas.len();
         let rows = alg.fold.traces(&alg.pairs, 8)[j].clone();
         let (q, d) = (1usize, Extension4::new(1, 2, 3, 4));
@@ -282,29 +367,64 @@ mod tests {
         let j = 4;
         let (st, proof, _) = lane(j);
         let inner = crate::state::StateAir { st: &st };
-        let view = view_of(&inner, &proof, j);
 
         // A changed opened value: its leaf no longer hashes to a leaf of the committed tree.
-        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         alg.opened[2].main[3] = crate::add_mod(alg.opened[2].main[3], 1, crate::RNS_MODULI[j]);
-        alg.leaf_words = LaneAlgebra::new(&inner, &proof, &view, INNER).leaf_words; // hasher keeps the honest words
+        alg.leaf_words = LaneAlgebra::new(&inner, &proof, INNER, b"inner").leaf_words; // hasher keeps the honest words
         assert!(!outer_ok(&alg), "opened value differs from the hashed leaf");
         let words = alg.composition.leaf_words(&alg.opened[2]);
         alg.leaf_words[composition_air::leaf_id(2, 0)] = words[0].clone();
         assert!(!outer_ok(&alg), "hashed leaf not in the tree");
 
         // The next row's aux opening (only its running sum enters the composition) is bound too.
-        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         alg.opened[1].aux_next[0] = alg.opened[1].aux_next[0].add(&Extension4::ONE, j);
         let words = alg.composition.leaf_words(&alg.opened[1]);
         alg.leaf_words[composition_air::leaf_id(1, 4)] = words[4].clone();
         assert!(!outer_ok(&alg), "next-row aux value");
 
         // A wrong public root.
-        let mut alg = LaneAlgebra::new(&inner, &proof, &view, INNER);
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
         for c in alg.merkle.claims.iter_mut().filter(|c| c.root == hash_to_words(&proof.aux_root)) {
             c.root[0] ^= 1;
         }
         assert!(!outer_ok(&alg), "wrong aux root");
+    }
+
+    #[test]
+    fn challenges_and_roots_must_come_from_the_transcript() {
+        let j = 3;
+        let (st, proof, _) = lane(j);
+        let inner = crate::state::StateAir { st: &st };
+
+        // The composition rows use a different alpha than the transcript squeezed.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.composition.chals.alpha = alg.composition.chals.alpha.add(&Extension4::ONE, j);
+        assert!(!outer_ok(&alg), "alpha not from the transcript");
+
+        // A FRI folding challenge not from the transcript.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.fold.alphas[3] = alg.fold.alphas[3].add(&Extension4::ONE, j);
+        assert!(!outer_ok(&alg), "FRI alpha not from the transcript");
+
+        // The transcript absorbed a different statement word.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.transcript.public_words[5].2 ^= 1;
+        assert!(!outer_ok(&alg), "public transcript word changed");
+
+        // A root written into the transcript that is not the root the paths end in.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.tree_root_values[1][0] ^= 1;
+        assert!(!outer_ok(&alg), "absorbed aux root differs from the tree");
+
+        // A final layer value that is not the absorbed one.
+        let mut alg = LaneAlgebra::new(&inner, &proof, INNER, b"inner");
+        alg.final_air.at.swap(0, 1);
+        assert!(!outer_ok(&alg), "final layer words moved");
+
+        // The inner proof under another transcript label: the replay itself fails.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| LaneAlgebra::new(&inner, &proof, INNER, b"other")));
+        assert!(r.is_err(), "inner proof accepted under another label");
     }
 }

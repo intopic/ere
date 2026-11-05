@@ -71,6 +71,9 @@ pub struct CompositionAir<'a, A: Air> {
     pub link_fri: bool,
     /// Send every opened leaf, in 8-word chunks, to the leaf hash AIR (R7): `leaf_air`.
     pub link_leaves: bool,
+    /// Full recursion mode (R7.2d): alpha, beta, rho, gamma, delta are the extension challenges
+    /// of these transcript permutations (bus `transcript_air::TAG_EXT`) instead of public.
+    pub chal_links: Option<[u32; 5]>,
     lay: Lay,
     table: Vec<u32>,
 }
@@ -188,7 +191,7 @@ impl<'a, A: Air> CompositionAir<'a, A> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(inner: &'a A, lane: usize, inner_params: StarkParams, chals: Challenges, gamma: Extension4, delta: Extension4, s_over_n: Extension4, claims: Vec<OpeningClaim>) -> Self {
         let lay = Lay::new(inner, &inner_params, lane);
-        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, link_fri: false, link_leaves: false, lay, table: table_coeffs(lane) }
+        Self { inner, lane, inner_params, chals, gamma, delta, s_over_n, claims, link_fri: false, link_leaves: false, chal_links: None, lay, table: table_coeffs(lane) }
     }
 
     fn n_lde(&self) -> usize {
@@ -202,16 +205,21 @@ impl<'a, A: Air> CompositionAir<'a, A> {
 
     fn public_tuple(&self, c: &OpeningClaim) -> Vec<u32> {
         let mut v = vec![c.q as u32, c.slot as u32];
-        for e in [self.chals.alpha, self.chals.beta, self.chals.rho, self.gamma, self.delta, self.s_over_n] {
-            v.extend(e.c);
+        let chals = [self.chals.alpha, self.chals.beta, self.chals.rho, self.gamma, self.delta];
+        if self.chal_links.is_none() {
+            v.extend(chals.iter().flat_map(|e| e.c));
         }
+        v.extend(self.s_over_n.c);
         v
     }
 
     fn row_tuple(&self, row: &[u32]) -> Vec<u32> {
         let l = &self.lay;
         let mut v = vec![row[l.qs], row[l.qs + 1]];
-        v.extend_from_slice(&row[l.chal..l.chal + 24]);
+        if self.chal_links.is_none() {
+            v.extend_from_slice(&row[l.chal..l.chal + 20]);
+        }
+        v.extend_from_slice(&row[l.chal + 20..l.chal + 24]);
         v
     }
 
@@ -423,6 +431,9 @@ impl<A: Air> Air for CompositionAir<'_, A> {
             v.extend_from_slice(&x.to_le_bytes());
         }
         v.push(self.link_fri as u8);
+        if let Some(ks) = self.chal_links {
+            v.extend(ks.iter().flat_map(|k| k.to_le_bytes()));
+        }
         for c in &self.claims {
             v.extend(self.public_tuple(c).iter().flat_map(|x| x.to_le_bytes()));
             if !self.link_fri {
@@ -450,7 +461,7 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         self.walk(&mut row, Some(out));
     }
     fn num_bus(&self) -> usize {
-        2 + self.leaf_chunks().iter().sum::<usize>()
+        2 + 5 + self.leaf_chunks().iter().sum::<usize>()
     }
     fn bus(&self, cur: &[u32], c: &Challenges, ch: usize, out: &mut Vec<BusTerm>) {
         let mut t = Vec::with_capacity(2);
@@ -461,6 +472,15 @@ impl<A: Air> Air for CompositionAir<'_, A> {
         let neg = sub_mod(0, cur[self.lay.act], RNS_MODULI[ch]);
         out.push(BusTuple { tag: TAG, values: self.row_tuple(cur), weight: neg });
         out.push(BusTuple { tag: crate::fri_air::LINK_LAYER0, values: self.layer0_tuple(cur), weight: neg });
+        // challenges from the transcript
+        let l = &self.lay;
+        for c in 0..5 {
+            let (k, w) = match self.chal_links {
+                Some(ks) => (ks[c], cur[l.act]),
+                None => (0, 0),
+            };
+            out.push(BusTuple { tag: crate::transcript_air::TAG_EXT, values: crate::transcript_air::ext_tuple(k, &cur[l.chal + 4 * c..l.chal + 4 * c + 4]), weight: w });
+        }
         // leaf chunks: (leaf id, chunk index, 8 words), sent to the leaf hash AIR
         let l = &self.lay;
         let m = RNS_MODULI[ch];

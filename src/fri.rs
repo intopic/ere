@@ -215,6 +215,12 @@ pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: 
 }
 
 fn absorb_final(t: &mut Transcript, final_layer: &Layer) {
+    if matches!(t.mode(), crate::hash::HashMode::Lane(_)) {
+        // as field words, so that the recursion AIR can link them to the fold table
+        let words: Vec<u32> = final_layer.iter().flatten().flat_map(|e| e.c).collect();
+        t.absorb_words(b"fri/final", &words);
+        return;
+    }
     let bytes: Vec<u8> = final_layer.iter().flatten().flat_map(|e| e.to_bytes()).collect();
     t.absorb(b"fri/final", &bytes);
 }

@@ -27,6 +27,10 @@ pub struct Transcript {
     sponge: Option<PoseidonSponge<Fr>>,
     p2: Option<Poseidon2Duplex>,
     lane: Option<u8>,
+    /// Poseidon2 modes: absorbed-word index of the 8 words of every `absorb_digest`, and
+    /// (start, len) of every `absorb_words` payload, in call order (the recursion schedule).
+    pub digests_at: Vec<usize>,
+    pub words_at: Vec<(usize, usize)>,
 }
 
 /// Duplex sponge over Poseidon2-KoalaBear: rate 8, capacity 8. Absorbing overwrites rate words
@@ -40,6 +44,19 @@ pub struct Poseidon2Duplex {
     out: Vec<u32>,
     /// Every permutation as (rate block written, full output state): what the sponge AIR proves.
     pub log: Vec<([u32; 8], [u32; crate::poseidon2::WIDTH])>,
+    /// (permutation, rate position) of every absorbed message word, in order (padding excluded).
+    pub absorbed_at: Vec<(usize, usize)>,
+    /// (permutation, rate position) of every squeezed word, in order.
+    pub squeezed_at: Vec<(usize, usize)>,
+    /// Real (non-padding) words in `pending`.
+    pending_real: usize,
+}
+
+impl Poseidon2Duplex {
+    /// Message words absorbed so far (including those still pending).
+    pub fn absorbed_count(&self) -> usize {
+        self.absorbed_at.len() + self.pending_real
+    }
 }
 
 impl Poseidon2Duplex {
@@ -47,19 +64,23 @@ impl Poseidon2Duplex {
         Self::new_ch(domain, crate::poseidon2::KOALA)
     }
     pub fn new_ch(domain: &[u32], ch: usize) -> Self {
-        let mut d = Self { ch, state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new(), log: Vec::new() };
+        let mut d = Self { ch, state: [0; crate::poseidon2::WIDTH], pending: Vec::new(), out: Vec::new(), log: Vec::new(), absorbed_at: Vec::new(), squeezed_at: Vec::new(), pending_real: 0 };
         d.absorb(domain);
         d
     }
     pub fn absorb(&mut self, words: &[u32]) {
         self.out.clear();
         self.pending.extend_from_slice(words);
+        self.pending_real += words.len();
         while self.pending.len() >= 8 {
             let block: Vec<u32> = self.pending.drain(..8).collect();
-            self.permute_with(&block);
+            self.pending_real -= 8;
+            self.permute_with(&block, 8);
         }
     }
-    fn permute_with(&mut self, block: &[u32]) {
+    fn permute_with(&mut self, block: &[u32], real: usize) {
+        let k = self.log.len();
+        self.absorbed_at.extend((0..real).map(|p| (k, p)));
         self.state[..8].copy_from_slice(block);
         crate::poseidon2::permute_ch(&mut self.state, self.ch);
         self.log.push((block.try_into().unwrap(), self.state));
@@ -69,11 +90,14 @@ impl Poseidon2Duplex {
         if self.out.is_empty() {
             // pad the pending block with its length marker and permute
             let mut block = std::mem::take(&mut self.pending);
+            let real = std::mem::take(&mut self.pending_real);
             block.push(1);
             block.resize(8, 0);
-            self.permute_with(&block);
+            self.permute_with(&block, real);
             self.out = self.state[..8].iter().rev().copied().collect();
         }
+        let p = 8 - self.out.len();
+        self.squeezed_at.push((self.log.len() - 1, p));
         self.out.pop().unwrap()
     }
 }
@@ -130,10 +154,18 @@ impl Transcript {
             let ch = mode.p2_channel();
             Poseidon2Duplex::new_ch(&poseidon2_message_ch(b"SS-RAP/v2/transcript", label, ch), ch)
         });
-        Self { state: *h.finalize().as_bytes(), counter: 0, sponge, p2, lane: match mode {
-            HashMode::Lane(j) => Some(j),
-            _ => None,
-        } }
+        Self {
+            state: *h.finalize().as_bytes(),
+            counter: 0,
+            sponge,
+            p2,
+            lane: match mode {
+                HashMode::Lane(j) => Some(j),
+                _ => None,
+            },
+            digests_at: Vec::new(),
+            words_at: Vec::new(),
+        }
     }
 
     /// The Poseidon2 duplex, when in that mode (the recursion layer reads its permutation log).
@@ -157,6 +189,7 @@ impl Transcript {
     /// goes in as its 8 field words (what the recursion AIR sees).
     pub fn absorb_digest(&mut self, label: &[u8], h: &crate::hash::Hash) {
         if let Some(d) = self.p2.as_mut() {
+            self.digests_at.push(d.absorbed_count() + 2);
             d.absorb(&poseidon2_digest_ch(label, &crate::hash::hash_to_words(h), d.ch));
             return;
         }
@@ -193,6 +226,19 @@ impl Transcript {
         h.update(data);
         self.state = *h.finalize().as_bytes();
         self.counter = 0;
+    }
+
+    /// Absorbs field words. In the Poseidon2 modes they go in as words (tag, marker 2^30 + 1,
+    /// length, words), which the recursion AIRs can link; otherwise as their LE bytes.
+    pub fn absorb_words(&mut self, label: &[u8], words: &[u32]) {
+        if let Some(d) = self.p2.as_mut() {
+            self.words_at.push((d.absorbed_count() + 3, words.len()));
+            let mut v = vec![crate::hash::tag_word_ch(label, d.ch), (1 << 30) + 1, words.len() as u32];
+            v.extend_from_slice(words);
+            d.absorb(&v);
+            return;
+        }
+        self.absorb_u32s(label, words);
     }
 
     pub fn absorb_u32s(&mut self, label: &[u8], data: &[u32]) {
@@ -248,6 +294,13 @@ impl Transcript {
     /// Uniform index in [0, bound), bound a power of two (FRI query positions).
     pub fn challenge_index(&mut self, label: &[u8], bound: usize) -> usize {
         assert!(bound.is_power_of_two());
+        if self.lane.is_some() {
+            // Per-lane mode: the low bits of the second of two squeezed words (each < m), so the
+            // recursion AIR needs one canonical bit decomposition. Bias < bound / m (< 2^-10).
+            let d = self.p2.as_mut().unwrap();
+            let _ = d.squeeze();
+            return d.squeeze() as usize & (bound - 1);
+        }
         if let Some(x) = self.squeeze_u64() {
             return x as usize & (bound - 1);
         }
