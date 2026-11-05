@@ -1,0 +1,27 @@
+[package]
+name = "bench-plonky3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Separate from the main workspace: an external baseline only (B2 in docs/BENCHMARK.md).
+[workspace]
+
+[dependencies]
+p3-air = "=0.9.0-rc.2"
+p3-challenger = "=0.9.0-rc.2"
+p3-commit = "=0.9.0-rc.2"
+p3-dft = { version = "=0.9.0-rc.2", features = ["parallel"] }
+p3-field = "=0.9.0-rc.2"
+p3-fri = "=0.9.0-rc.2"
+p3-keccak = "=0.9.0-rc.2"
+p3-koala-bear = "=0.9.0-rc.2"
+p3-merkle-tree = "=0.9.0-rc.2"
+p3-poseidon2-air = "=0.9.0-rc.2"
+p3-symmetric = "=0.9.0-rc.2"
+p3-uni-stark = "=0.9.0-rc.2"
+p3-maybe-rayon = { version = "=0.9.0-rc.2", features = ["parallel"] }
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+
+[profile.release]
+opt-level = 3
