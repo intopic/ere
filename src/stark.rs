@@ -34,7 +34,7 @@ use crate::ntt::{intt, ntt, root_of_unity};
 use crate::transcript::Transcript;
 use crate::uint256::{eval_columns, p_columns, Modulus256, MulModRow, CONSTRAINTS_PER_CHANNEL, NUM_COLUMNS};
 use crate::{mod_inv_single, mul_mod_channel, sub_mod, Extension4, DEFAULT_RNS_CHANNELS, EXTENSION_BETA, RNS_MODULI};
-use blake3::Hasher;
+use crate::hash::{hash_leaf, HashMode};
 use rayon::prelude::*;
 
 /// Runs `f` for the 5 RNS lanes in parallel: the lanes share no data (PDF: carry-free,
@@ -301,57 +301,24 @@ fn fri_combination(main: &[u32], aux: &[Extension4], q: &Extension4, delta: &Ext
     q.add(&acc.mul(delta, ch), ch)
 }
 
-fn main_leaf(cols: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], i: usize) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/main");
-    for ch_cols in cols {
-        for c in ch_cols {
-            h.update(&c[i].to_le_bytes());
-        }
-    }
-    *h.finalize().as_bytes()
+fn main_values(cols: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS], i: usize) -> Vec<u32> {
+    cols.iter().flat_map(|ch_cols| ch_cols.iter().map(move |c| c[i])).collect()
 }
 
-fn aux_leaf(cols: &[Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS], i: usize) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/aux");
-    for ch_cols in cols {
-        for c in ch_cols {
-            h.update(&c[i].to_bytes());
-        }
-    }
-    *h.finalize().as_bytes()
+fn aux_values(cols: &[Vec<Vec<Extension4>>; DEFAULT_RNS_CHANNELS], i: usize) -> Vec<u32> {
+    cols.iter().flat_map(|ch_cols| ch_cols.iter().flat_map(move |c| c[i].c)).collect()
 }
 
-fn main_leaf_from(o: &Opening) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/main");
-    for ch in 0..DEFAULT_RNS_CHANNELS {
-        for v in &o.main[ch] {
-            h.update(&v.to_le_bytes());
-        }
-    }
-    *h.finalize().as_bytes()
+pub fn main_leaf_from(mode: HashMode, o: &Opening) -> Hash {
+    hash_leaf(mode, b"SS-RAP/v2/main", &o.main.iter().flatten().copied().collect::<Vec<_>>())
 }
 
-fn aux_leaf_from(o: &Opening) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/aux");
-    for ch in 0..DEFAULT_RNS_CHANNELS {
-        for v in &o.aux[ch] {
-            h.update(&v.to_bytes());
-        }
-    }
-    *h.finalize().as_bytes()
+pub fn aux_leaf_from(mode: HashMode, o: &Opening) -> Hash {
+    hash_leaf(mode, b"SS-RAP/v2/aux", &o.aux.iter().flatten().flat_map(|e| e.c).collect::<Vec<_>>())
 }
 
-fn q_leaf(q: &[Extension4; DEFAULT_RNS_CHANNELS]) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/quotient");
-    for v in q {
-        h.update(&v.to_bytes());
-    }
-    *h.finalize().as_bytes()
+pub fn q_leaf(mode: HashMode, q: &[Extension4; DEFAULT_RNS_CHANNELS]) -> Hash {
+    hash_leaf(mode, b"SS-RAP/v2/quotient", &q.iter().flat_map(|e| e.c).collect::<Vec<_>>())
 }
 
 fn start_transcript<A: Air>(t: &mut Transcript, air: &A, params: &StarkParams, rows: usize) {
@@ -401,7 +368,8 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols
     });
     let main_lde: [Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS] = per_channel(|ch| main_hs[ch].iter().map(|col| coset_lde(col, blowup, ch)).collect());
-    let main_tree = Tree::from_leaves((0..n).map(|i| main_leaf(&main_lde, i)).collect());
+    let mode = t.mode();
+    let main_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/main", &main_values(&main_lde, i))));
     t.absorb(b"stark/main", &main_tree.root());
     let chals = draw_challenges(t);
 
@@ -448,7 +416,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         cols.push(h);
         cols.iter().map(|col| coset_lde_ext(col, blowup, ch)).collect()
     });
-    let aux_tree = Tree::from_leaves((0..n).map(|i| aux_leaf(&aux_lde, i)).collect());
+    let aux_tree = Tree::from_leaves(mode, crate::par_map(n, |i| hash_leaf(mode, b"SS-RAP/v2/aux", &aux_values(&aux_lde, i))));
     t.absorb(b"stark/aux", &aux_tree.root());
     let gammas = t.challenge_ext4_all(b"stark/gamma");
 
@@ -488,7 +456,7 @@ pub fn prove_air<A: Air>(air: &A, traces: &[Vec<Vec<u32>>; DEFAULT_RNS_CHANNELS]
         }
         out
     });
-    let q_tree = Tree::from_leaves((0..n).map(|i| q_leaf(&std::array::from_fn(|ch| quotient[ch][i]))).collect());
+    let q_tree = Tree::from_leaves(mode, crate::par_map(n, |i| q_leaf(mode, &std::array::from_fn(|ch| quotient[ch][i]))));
     t.absorb(b"stark/quotient", &q_tree.root());
     let deltas = t.challenge_ext4_all(b"stark/delta");
 
@@ -555,6 +523,7 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         return false;
     };
     let (mut base, mut bus) = (Vec::new(), Vec::new());
+    let mode = t.mode();
 
     for (q, (&i, opens)) in indices.iter().zip(&proof.openings).enumerate() {
         let j = i + n / 2;
@@ -562,9 +531,9 @@ pub fn verify_air<A: Air>(air: &A, proof: &StarkProof, max_rows: usize, params: 
         for (o, &pos) in opens.iter().zip(&positions) {
             let shape_ok = (0..DEFAULT_RNS_CHANNELS).all(|ch| o.main[ch].len() == l.main_cols() && o.aux[ch].len() == l.aux_cols());
             if !shape_ok
-                || !fri::verify_path(&proof.main_root, main_leaf_from(o), pos, &o.main_path)
-                || !fri::verify_path(&proof.aux_root, aux_leaf_from(o), pos, &o.aux_path)
-                || !fri::verify_path(&proof.q_root, q_leaf(&o.quotient), pos, &o.q_path)
+                || !fri::verify_path(mode, &proof.main_root, main_leaf_from(mode, o), pos, &o.main_path)
+                || !fri::verify_path(mode, &proof.aux_root, aux_leaf_from(mode, o), pos, &o.aux_path)
+                || !fri::verify_path(mode, &proof.q_root, q_leaf(mode, &o.quotient), pos, &o.q_path)
             {
                 return false;
             }

@@ -660,6 +660,9 @@ dependencies = [
 name = "ss_rap_v2"
 version = "2.1.0"
 dependencies = [
+ "ark-bn254",
+ "ark-crypto-primitives",
+ "ark-ff",
  "blake3",
  "num-bigint",
  "num-integer",

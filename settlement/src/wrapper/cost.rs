@@ -2,7 +2,7 @@
 //! the full in-circuit STARK verifier for a given proof shape.
 
 use super::fp31::{E4, M31};
-use super::poseidon;
+
 use ark_bn254::Fr;
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
 use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
@@ -47,11 +47,11 @@ pub fn measure() -> GadgetCosts {
         }) - 2 * 4 * value
     };
     let (ext_mul, ext_mul_lazy) = (ext(true), ext(false));
-    let cfg = poseidon::config();
+    let cfg = ss_rap_v2::hash::poseidon_config();
     let hash2 = count(|cs| {
         let a = FpVar::new_witness(cs.clone(), || Ok(Fr::from(1u64))).unwrap();
         let b = FpVar::new_witness(cs.clone(), || Ok(Fr::from(2u64))).unwrap();
-        let mut s = PoseidonSpongeVar::new(cs.clone(), &cfg);
+        let mut s = PoseidonSpongeVar::new(cs.clone(), cfg);
         s.absorb(&vec![a, b]).unwrap();
         s.squeeze_field_elements(1).unwrap();
     });

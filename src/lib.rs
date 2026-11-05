@@ -9,7 +9,14 @@
 //!    with beta = [11, 3, 5, 11, 5] (proven Quadratic Non-Residues for all 5 primes).
 //! 5. O(N) Montgomery Batch Inversion for FRI Folding & LogUp Denominators (Zero Euclidean while-loops in hot loops).
 
+/// Parallel map over 0..n (rayon), used for hashing tree levels.
+pub fn par_map<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<T> {
+    use rayon::prelude::*;
+    (0..n).into_par_iter().map(f).collect()
+}
+
 pub mod fri;
+pub mod hash;
 pub mod logup;
 pub mod ntt;
 pub mod rns256;

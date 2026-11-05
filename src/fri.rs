@@ -19,9 +19,8 @@
 use crate::ntt::{lde, root_of_unity};
 use crate::transcript::Transcript;
 use crate::{batch_inverse_channel, mod_inv_single, mul_mod_channel, Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
-use blake3::Hasher;
-
-pub type Hash = [u8; 32];
+pub use crate::hash::Hash;
+use crate::hash::{hash_leaf, hash_node, HashMode};
 pub type Layer = [Vec<Extension4>; DEFAULT_RNS_CHANNELS];
 type Pair = [[Extension4; 2]; DEFAULT_RNS_CHANNELS];
 
@@ -61,39 +60,33 @@ impl FriProof {
     }
 }
 
-fn leaf_hash(pair: &Pair) -> Hash {
-    let mut h = Hasher::new();
-    h.update(b"SS-RAP/v2/fri-leaf");
-    for p in pair {
-        h.update(&p[0].to_bytes());
-        h.update(&p[1].to_bytes());
-    }
-    *h.finalize().as_bytes()
+fn leaf_hash(mode: HashMode, pair: &Pair) -> Hash {
+    let v: Vec<u32> = pair.iter().flat_map(|p| p[0].c.into_iter().chain(p[1].c)).collect();
+    hash_leaf(mode, b"SS-RAP/v2/fri-leaf", &v)
 }
 
-pub fn node_hash(l: &Hash, r: &Hash) -> Hash {
-    let mut h = Hasher::new();
-    h.update(l);
-    h.update(r);
-    *h.finalize().as_bytes()
+pub fn node_hash(mode: HashMode, l: &Hash, r: &Hash) -> Hash {
+    hash_node(mode, l, r)
 }
 
-/// Binary Blake3 Merkle tree (V-UMT when a leaf packs all 5 channels). levels[0] = leaves.
+/// Binary Merkle tree (V-UMT when a leaf packs all 5 channels). levels[0] = leaves.
 pub struct Tree {
     levels: Vec<Vec<Hash>>,
 }
 
 impl Tree {
-    fn build(layer: &Layer) -> Self {
+    fn build(mode: HashMode, layer: &Layer) -> Self {
         let half = layer[0].len() / 2;
-        Self::from_leaves((0..half).map(|j| leaf_hash(&pair_at(layer, j))).collect())
+        let leaves = crate::par_map(half, |j| leaf_hash(mode, &pair_at(layer, j)));
+        Self::from_leaves(mode, leaves)
     }
-    pub fn from_leaves(leaves: Vec<Hash>) -> Self {
+    pub fn from_leaves(mode: HashMode, leaves: Vec<Hash>) -> Self {
         assert!(leaves.len().is_power_of_two());
         let mut levels = vec![leaves];
         while levels.last().unwrap().len() > 1 {
             let prev = levels.last().unwrap();
-            levels.push(prev.chunks(2).map(|c| node_hash(&c[0], &c[1])).collect());
+            let next = crate::par_map(prev.len() / 2, |i| node_hash(mode, &prev[2 * i], &prev[2 * i + 1]));
+            levels.push(next);
         }
         Self { levels }
     }
@@ -110,10 +103,10 @@ impl Tree {
     }
 }
 
-pub fn verify_path(root: &Hash, leaf: Hash, mut idx: usize, path: &[Hash]) -> bool {
+pub fn verify_path(mode: HashMode, root: &Hash, leaf: Hash, mut idx: usize, path: &[Hash]) -> bool {
     let mut h = leaf;
     for sib in path {
-        h = if idx & 1 == 0 { node_hash(&h, sib) } else { node_hash(sib, &h) };
+        h = if idx & 1 == 0 { node_hash(mode, &h, sib) } else { node_hash(mode, sib, &h) };
         idx >>= 1;
     }
     &h == root
@@ -176,7 +169,7 @@ pub fn prove_coset(initial: Layer, shift: &[u32; DEFAULT_RNS_CHANNELS], params: 
     let mut trees = Vec::new();
     let mut roots = Vec::new();
     for _ in 0..params.log_degree {
-        let tree = Tree::build(layers.last().unwrap());
+        let tree = Tree::build(t.mode(), layers.last().unwrap());
         t.absorb(b"fri/root", &tree.root());
         roots.push(tree.root());
         trees.push(tree);
@@ -250,7 +243,7 @@ fn verify_inner(proof: &FriProof, shift0: &[u32; DEFAULT_RNS_CHANNELS], params: 
             let half = n / 2;
             let j = i % half;
             if open.path.len() != half.trailing_zeros() as usize
-                || !verify_path(&proof.layer_roots[l], leaf_hash(&open.pair), j, &open.path)
+                || !verify_path(t.mode(), &proof.layer_roots[l], leaf_hash(t.mode(), &open.pair), j, &open.path)
             {
                 return None;
             }

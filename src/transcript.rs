@@ -6,27 +6,73 @@
 //! what makes LogUp and FRI sound in the non-interactive setting. The PDF (f.3, §2.2) assumes
 //! "the same Fiat-Shamir challenger alpha"; v2.0 used a hard-coded constant instead.
 
+//!
+//! With `HashMode::Poseidon` the same API runs a Poseidon duplex sponge over BN254, so that a
+//! BN254 circuit can re-derive every challenge: messages are absorbed as (tag, length, 16-byte
+//! chunks) field elements, and each challenge takes the low 64 bits of one squeezed element
+//! (reduced mod m for field challenges: statistical distance < 2^-32 per challenge).
+
+use crate::hash::{poseidon_config, tag_fr, HashMode};
 use crate::{Extension4, DEFAULT_RNS_CHANNELS, RNS_MODULI};
+use ark_bn254::Fr;
+use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
+use ark_crypto_primitives::sponge::CryptographicSponge;
+use ark_ff::{BigInteger, PrimeField};
 use blake3::Hasher;
 
 #[derive(Clone)]
 pub struct Transcript {
     state: [u8; 32],
     counter: u64,
+    sponge: Option<PoseidonSponge<Fr>>,
+}
+
+/// Field elements a Poseidon transcript absorbs for one message (shared with the circuit).
+pub fn poseidon_message(label: &[u8], data: &[u8]) -> Vec<Fr> {
+    let mut v = vec![tag_fr(label), Fr::from(data.len() as u64)];
+    v.extend(data.chunks(16).map(Fr::from_le_bytes_mod_order));
+    v
 }
 
 impl Transcript {
     /// Domain-separated start. Different protocols must use different labels.
     pub fn new(label: &[u8]) -> Self {
+        Self::with_mode(label, HashMode::Blake3)
+    }
+
+    pub fn with_mode(label: &[u8], mode: HashMode) -> Self {
         let mut h = Hasher::new();
         h.update(b"SS-RAP/v2/transcript");
         h.update(&(label.len() as u64).to_le_bytes());
         h.update(label);
-        Self { state: *h.finalize().as_bytes(), counter: 0 }
+        let sponge = (mode == HashMode::Poseidon).then(|| {
+            let mut s = PoseidonSponge::new(poseidon_config());
+            s.absorb(&poseidon_message(b"SS-RAP/v2/transcript", label));
+            s
+        });
+        Self { state: *h.finalize().as_bytes(), counter: 0, sponge }
+    }
+
+    pub fn mode(&self) -> HashMode {
+        if self.sponge.is_some() {
+            HashMode::Poseidon
+        } else {
+            HashMode::Blake3
+        }
+    }
+
+    fn squeeze_u64(&mut self) -> Option<u64> {
+        let s = self.sponge.as_mut()?;
+        let x = s.squeeze_field_elements::<Fr>(1)[0];
+        Some(u64::from_le_bytes(x.into_bigint().to_bytes_le()[..8].try_into().unwrap()))
     }
 
     /// Absorb a labelled message. Length-prefixed so that messages cannot be re-split.
     pub fn absorb(&mut self, label: &[u8], data: &[u8]) {
+        if let Some(s) = self.sponge.as_mut() {
+            s.absorb(&poseidon_message(label, data));
+            return;
+        }
         let mut h = Hasher::new();
         h.update(&self.state);
         h.update(&(label.len() as u64).to_le_bytes());
@@ -55,6 +101,9 @@ impl Transcript {
     /// Uniform element of F_m (rejection sampling on 32-bit words, no modulo bias).
     pub fn challenge_base(&mut self, label: &[u8], ch: usize) -> u32 {
         let m = RNS_MODULI[ch];
+        if let Some(x) = self.squeeze_u64() {
+            return (x % m as u64) as u32;
+        }
         loop {
             let block = self.squeeze_block(label);
             for w in block.chunks_exact(4) {
@@ -84,6 +133,9 @@ impl Transcript {
     /// Uniform index in [0, bound), bound a power of two (FRI query positions).
     pub fn challenge_index(&mut self, label: &[u8], bound: usize) -> usize {
         assert!(bound.is_power_of_two());
+        if let Some(x) = self.squeeze_u64() {
+            return x as usize & (bound - 1);
+        }
         let block = self.squeeze_block(label);
         (u64::from_le_bytes(block[0..8].try_into().unwrap()) as usize) & (bound - 1)
     }
