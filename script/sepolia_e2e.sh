@@ -47,17 +47,17 @@ onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,by
   "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BLOB_HASH" "$BATCH" --rpc-url "$SEPOLIA_RPC_URL")
 echo "public input on-chain: $onchain (prover: $PUBLIC_INPUT)"
 
-# the batch itself: calldata plus the blob the contract reads with blobhash(0)
-set +e
-cast send "$settlement" \
-  "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
-  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C" \
-  --blob --path "$out/blob.bin" "${send[@]}" --json > "$out/send.out" 2>&1
-rc=$?
-set -e
-echo "cast send exit $rc:"; cat "$out/send.out"; echo
-[ "$rc" = 0 ] || exit 1
-tx=$(jq -r .transactionHash "$out/send.out")
+# the batch itself: calldata plus OUR blob (the one the proof binds), read with blobhash(0)
+calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
+  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C")
+gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
+blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
+nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
+raw=$(python3 script/send_blob_tx.py "$out/blob.bin" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
+  $((gas * 2 + 2000000000)) 2000000000 $((blobfee * 2 + 1000000000)))
+tx=$(cast publish "$raw" --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"' | grep -o '0x[0-9a-fA-F]\{64\}' | head -1)
+[ -n "$tx" ] || { echo "the blob transaction was not accepted"; exit 1; }
+cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" >/dev/null  # waits for inclusion
 echo "batch transaction $tx"
 cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq '{status,blockNumber,gasUsed,blobGasUsed,blobGasPrice}'
 
