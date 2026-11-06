@@ -12,6 +12,7 @@ usage: send_blob_tx.py <blob.bin> <expected versioned hash> <to> <calldata> <cha
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 from eth_account import Account
@@ -41,9 +42,12 @@ raw = "0x" + signed.raw_transaction.hex().removeprefix("0x")
 req = urllib.request.Request(
     os.environ["SEPOLIA_RPC_URL"],
     data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw]}).encode(),
-    headers={"content-type": "application/json"},
+    headers={"content-type": "application/json", "user-agent": "ere-sepolia-e2e/1.0"},
 )
-reply = json.load(urllib.request.urlopen(req, timeout=60))
+try:
+    reply = json.load(urllib.request.urlopen(req, timeout=60))
+except urllib.error.HTTPError as e:
+    sys.exit(f"eth_sendRawTransaction: HTTP {e.code}: {e.read()[:500]!r}")
 if "error" in reply:
     sys.exit(f"eth_sendRawTransaction: {reply['error']}")
 print(reply["result"])
