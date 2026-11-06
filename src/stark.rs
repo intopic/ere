@@ -807,7 +807,7 @@ fn check_table<A: Air + ?Sized>(air: &A, proof: &StarkProof, params: &StarkParam
 }
 
 // ---------------------------------------------------------------------------------------------
-// Per-lane proofs (recursion path, docs/REKURSIONI.md "pemë për korsi")
+// Per-lane proofs (recursion path, archive/recursion/REKURSIONI.md "pemë për korsi")
 // ---------------------------------------------------------------------------------------------
 
 /// Proves every lane as its own STARK (`HashMode::Lane(j)`): lane j's trees, transcript and FRI

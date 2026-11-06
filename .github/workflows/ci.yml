@@ -26,20 +26,25 @@ jobs:
         run: |
           cargo run --release --locked -p ss_rap_settlement --example export_stark_fixture | tee r8.txt
           git diff --exit-code -- contracts/StarkWrapperVerifier.sol test/StarkSettlementFixture.sol
+      - name: P4b Plonky3 settlement circuit (5-lane Plonky3 STARK verified inside Groth16; writes verifier + fixture)
+        run: |
+          cargo run --release --locked -p ss_rap_settlement --example export_p3_fixture | tee p4b.txt
+          git diff --exit-code -- contracts/P3WrapperVerifier.sol test/P3SettlementFixture.sol
       - name: PDF strategy benchmark
         run: cargo run --release --locked --example bench_pdf_strategy -- 65536 | tee bench_pdf_strategy.txt
       - name: End-to-end STARK benchmark (5 lanes x 1024 uint256 MULMOD)
         run: cargo run --release --locked --example bench_stark_mulmod -- 10 | tee bench_stark_mulmod.txt
-      - name: RNS-256 benchmark
-        run: cargo run --release --locked --example bench_rns256 | tee bench_rns256.txt
+      - name: Plonky3 state lanes (1000 transfers)
+        run: cargo run --release --locked -p ss_rap_p3 --example bench_p3_state -- 1000 | tee bench_p3_state.txt
       - name: Benchmark summary
         run: |
           {
             echo '## Phase C end-to-end'; echo '```'; cat e2e.txt; echo '```'
             echo '## R8 settlement circuit'; echo '```'; cat r8.txt; echo '```'
+            echo '## P4b Plonky3 settlement circuit'; echo '```'; cat p4b.txt; echo '```'
             echo '## bench_pdf_strategy'; echo '```'; cat bench_pdf_strategy.txt; echo '```'
             echo '## bench_stark_mulmod'; echo '```'; cat bench_stark_mulmod.txt; echo '```'
-            echo '## bench_rns256'; echo '```'; cat bench_rns256.txt; echo '```'
+            echo '## bench_p3_state'; echo '```'; cat bench_p3_state.txt; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
   solidity:

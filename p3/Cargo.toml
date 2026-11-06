@@ -1,0 +1,33 @@
+[package]
+name = "ss_rap_p3"
+version = "0.1.0"
+edition = "2021"
+description = "SS-RAP AIRs on the Plonky3 STARK engine (decision 5.11: replace the in-house engine)"
+
+[dependencies]
+ss_rap_v2 = { path = ".." }
+num-bigint = "0.4"
+blake3 = "1.5"
+num-bigint-05 = { package = "num-bigint", version = "0.5" }
+p3-poseidon2 = "=0.9.0-rc.2"
+p3-air = "=0.9.0-rc.2"
+p3-baby-bear = "=0.9.0-rc.2"
+p3-batch-stark = "=0.9.0-rc.2"
+p3-challenger = "=0.9.0-rc.2"
+p3-commit = "=0.9.0-rc.2"
+p3-dft = { version = "=0.9.0-rc.2", features = ["parallel"] }
+p3-field = "=0.9.0-rc.2"
+p3-fri = "=0.9.0-rc.2"
+p3-lookup = "=0.9.0-rc.2"
+p3-matrix = "=0.9.0-rc.2"
+p3-maybe-rayon = { version = "=0.9.0-rc.2", features = ["parallel"] }
+p3-bn254 = "=0.9.0-rc.2"
+p3-keccak = "=0.9.0-rc.2"
+p3-merkle-tree = "=0.9.0-rc.2"
+p3-symmetric = "=0.9.0-rc.2"
+p3-uni-stark = "=0.9.0-rc.2"
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+
+[dev-dependencies]
+tracing-forest = { version = "0.1", features = ["ansi", "smallvec"] }
+tracing-subscriber = { version = "0.3", features = ["std", "env-filter"] }

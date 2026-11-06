@@ -152,7 +152,7 @@ impl StateStatement {
     }
 
     /// Shape checks the verifier does on the public data before touching the proof.
-    fn well_formed(&self, n_rows: usize) -> bool {
+    pub fn well_formed(&self, n_rows: usize) -> bool {
         let k = self.addrs.len();
         let max_ts = 2 * n_rows as u32 + 1;
         k > 0

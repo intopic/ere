@@ -15,26 +15,14 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<
     (0..n).into_par_iter().map(f).collect()
 }
 
-pub mod composition_air;
 pub mod fri;
-pub mod fri_air;
 pub mod hash;
-pub mod index_air;
-pub mod leaf_air;
-pub mod link_air;
 pub mod logup;
-pub mod multi_air;
-pub mod merkle_air;
 pub mod ntt;
 pub mod poseidon2;
 pub mod poseidon2_air;
-pub mod public_sum_air;
-pub mod recursion;
-pub mod rns256;
-pub mod sponge_air;
 pub mod stark;
 pub mod state;
-pub mod transcript_air;
 pub mod transcript;
 pub mod uint256;
 

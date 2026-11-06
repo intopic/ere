@@ -13,6 +13,7 @@ ark-groth16 = { version = "0.5", features = ["parallel"] }
 ark-relations = "0.5"
 ark-snark = "0.5"
 ark-std = { version = "0.5", features = ["parallel"] }
+rayon = "1.10"
 ark-serialize = "0.5"
 ark-r1cs-std = "0.5"
 ark-crypto-primitives = { version = "0.5", default-features = false, features = ["sponge", "r1cs"] }
@@ -20,3 +21,16 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 num-bigint = "0.4"
 rand_chacha = "0.3"
 blake3 = "1.5"
+ss_rap_p3 = { path = "../p3" }
+p3-bn254 = "=0.9.0-rc.2"
+p3-field = "=0.9.0-rc.2"
+p3-baby-bear = "=0.9.0-rc.2"
+p3-commit = "=0.9.0-rc.2"
+p3-matrix = "=0.9.0-rc.2"
+p3-uni-stark = "=0.9.0-rc.2"
+p3-util = "=0.9.0-rc.2"
+p3-symmetric = "=0.9.0-rc.2"
+num-bigint-05 = { package = "num-bigint", version = "0.5" }
+p3-air = "=0.9.0-rc.2"
+p3-batch-stark = "=0.9.0-rc.2"
+p3-lookup = "=0.9.0-rc.2"

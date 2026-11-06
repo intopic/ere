@@ -1,6 +1,6 @@
 //! Poseidon2 over each of the five 31-bit RNS fields, width 16.
 //!
-//! This is the hash the recursion layer uses inside the STARK (docs/REKURSIONI.md): it is
+//! This is the hash the recursion layer uses inside the STARK (archive/recursion/REKURSIONI.md): it is
 //! native to the field of each lane, so a permutation costs a few hundred trace cells instead
 //! of the thousands of bit operations Blake3 needs, and every lane can verify its own
 //! commitments and challenges without leaving its field.
