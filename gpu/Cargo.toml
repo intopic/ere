@@ -1,0 +1,29 @@
+[package]
+name = "ss_rap_gpu"
+version = "0.1.0"
+edition = "2021"
+description = "Groth16 prover of the SS-RAP settlement circuit with ICICLE MSMs (GPU via the CUDA backend, CPU backend for tests)"
+
+# Not part of the main workspace: ICICLE builds C++ with CMake, which CI does not need.
+[workspace]
+
+[dependencies]
+ss_rap_settlement = { path = "../settlement" }
+ss_rap_p3 = { path = "../p3" }
+ss_rap_v2 = { path = ".." }
+ark-bn254 = "0.5"
+ark-ec = { version = "0.5", features = ["parallel"] }
+ark-ff = { version = "0.5", features = ["parallel"] }
+ark-groth16 = { version = "0.5", features = ["parallel"] }
+ark-poly = { version = "0.5", features = ["parallel"] }
+ark-relations = "0.5"
+ark-std = { version = "0.5", features = ["parallel"] }
+rand_chacha = "0.3"
+rayon = "1.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle", tag = "v3.9.2" }
+icicle-core = { git = "https://github.com/ingonyama-zk/icicle", tag = "v3.9.2" }
+icicle-bn254 = { git = "https://github.com/ingonyama-zk/icicle", tag = "v3.9.2" }
+
+[profile.release]
+debug = false

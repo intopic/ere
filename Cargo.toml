@@ -16,3 +16,4 @@ ark-crypto-primitives = { version = "0.5", default-features = false, features = 
 
 [workspace]
 members = [".", "settlement", "p3"]
+exclude = ["gpu"]
