@@ -18,9 +18,12 @@ use p3_matrix::dense::RowMajorMatrix;
 use ss_rap_v2::state::{StateStatement, ACTIVE, AMT, BYTE_COLS, CF, CT, D1, D2, FROM_ID, FROM_NEW, FROM_OLD, NONCE, T, TO_ID, TO_NEW, TO_NONCE, TO_OLD, TR1, TR2, WIDTH};
 use std::borrow::Cow;
 
-/// Main state AIR of one lane.
+/// Main state AIR of one lane. Its "mem" and "tx" tuples start with the lane number, so the
+/// 5 lanes can share one batch proof (and its buses) without one lane's rows cancelling another's.
 #[derive(Clone, Debug)]
-pub struct StateLaneAir;
+pub struct StateLaneAir {
+    pub lane: u32,
+}
 
 impl<F> BaseAir<F> for StateLaneAir {
     fn width(&self) -> usize {
@@ -28,8 +31,8 @@ impl<F> BaseAir<F> for StateLaneAir {
     }
 }
 
-fn mem<E: Clone>(id: E, nonce: E, ts: E, bal: &[E]) -> Vec<E> {
-    let mut v = vec![id, nonce, ts];
+fn mem<E: Clone>(tag: &E, id: E, nonce: E, ts: E, bal: &[E]) -> Vec<E> {
+    let mut v = vec![tag.clone(), id, nonce, ts];
     v.extend_from_slice(bal);
     v
 }
@@ -70,12 +73,13 @@ where
             builder.push_interaction("byte", [c[j].clone()], 1);
         }
         let act = c[ACTIVE].clone();
+        let tag = AB::Expr::from_u32(self.lane);
         let w = |e: AB::Expr| Count::bounded(e, 1);
-        builder.push_interaction("mem", mem(c[FROM_ID].clone(), c[NONCE].clone(), c[TR1].clone(), &c[FROM_OLD..FROM_OLD + 8]), w(act.clone()));
-        builder.push_interaction("mem", mem(c[FROM_ID].clone(), c[NONCE].clone() + one.clone(), two_t.clone(), &c[FROM_NEW..FROM_NEW + 8]), w(-act.clone()));
-        builder.push_interaction("mem", mem(c[TO_ID].clone(), c[TO_NONCE].clone(), c[TR2].clone(), &c[TO_OLD..TO_OLD + 8]), w(act.clone()));
-        builder.push_interaction("mem", mem(c[TO_ID].clone(), c[TO_NONCE].clone(), two_t + one, &c[TO_NEW..TO_NEW + 8]), w(-act.clone()));
-        let mut tx = vec![c[T].clone(), c[FROM_ID].clone(), c[TO_ID].clone(), c[NONCE].clone()];
+        builder.push_interaction("mem", mem(&tag, c[FROM_ID].clone(), c[NONCE].clone(), c[TR1].clone(), &c[FROM_OLD..FROM_OLD + 8]), w(act.clone()));
+        builder.push_interaction("mem", mem(&tag, c[FROM_ID].clone(), c[NONCE].clone() + one.clone(), two_t.clone(), &c[FROM_NEW..FROM_NEW + 8]), w(-act.clone()));
+        builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), c[TR2].clone(), &c[TO_OLD..TO_OLD + 8]), w(act.clone()));
+        builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), two_t + one, &c[TO_NEW..TO_NEW + 8]), w(-act.clone()));
+        let mut tx = vec![tag.clone(), c[T].clone(), c[FROM_ID].clone(), c[TO_ID].clone(), c[NONCE].clone()];
         tx.extend_from_slice(&c[AMT..AMT + 8]);
         builder.push_interaction("tx", tx, w(-act));
     }
@@ -92,6 +96,7 @@ pub struct PublicAir<F> {
     /// PUB_COLS columns, each of length `rows` (a power of two).
     pub cols: Vec<Vec<F>>,
     pub log_rows: usize,
+    pub lane: u32,
 }
 
 fn bal_bytes(b: u64) -> [u32; 8] {
@@ -127,7 +132,7 @@ impl<F: Field> PublicAir<F> {
         let n = rows.len().next_power_of_two().max(4);
         rows.resize(n, vec![F::ZERO; PUB_COLS]);
         let cols = (0..PUB_COLS).map(|j| rows.iter().map(|r| r[j]).collect()).collect();
-        Self { cols, log_rows: n.trailing_zeros() as usize }
+        Self { cols, log_rows: n.trailing_zeros() as usize, lane: lane as u32 }
     }
 
     /// The same values as a main trace (lookup trace generation reads main columns only); the
@@ -161,8 +166,10 @@ where
         for (a, b) in p.iter().zip(q) {
             builder.assert_eq(a.clone(), b);
         }
-        builder.push_interaction("mem", p[..PUB_MEM].to_vec(), Count::bounded(p[PUB_MEM].clone(), 1));
-        builder.push_interaction("tx", p[PUB_MEM + 1..PUB_MEM + 1 + PUB_TX].to_vec(), Count::bounded(p[PUB_COLS - 1].clone(), 1));
+        let tag = AB::Expr::from_u32(self.lane);
+        let with_tag = |v: &[AB::Expr]| std::iter::once(tag.clone()).chain(v.iter().cloned()).collect::<Vec<_>>();
+        builder.push_interaction("mem", with_tag(&p[..PUB_MEM]), Count::bounded(p[PUB_MEM].clone(), 1));
+        builder.push_interaction("tx", with_tag(&p[PUB_MEM + 1..PUB_MEM + 1 + PUB_TX]), Count::bounded(p[PUB_COLS - 1].clone(), 1));
     }
 }
 
@@ -239,15 +246,59 @@ pub fn lane_instance<F: Field>(st: &StateStatement, trace: &[Vec<u32>], lane: us
     let pl = public.log_rows;
     let pt = public.trace();
     (
-        vec![LaneAirs::State(StateLaneAir), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(public)],
+        vec![LaneAirs::State(StateLaneAir { lane: lane as u32 }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(public)],
         vec![RowMajorMatrix::new(v, WIDTH), ByteTableAir::from_counts(&counts), pt],
         vec![n.trailing_zeros() as usize, 8, pl],
     )
 }
 
+/// All 5 lanes in one batch proof: [State 0..5, Bytes (shared), Public 0..5].
+pub fn all_instance<F: Field>(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5]) -> (Vec<LaneAirs<F>>, Vec<RowMajorMatrix<F>>, Vec<usize>) {
+    let mut counts = [0u64; 256];
+    let mut mains = Vec::new();
+    for t in traces {
+        let mut v = Vec::with_capacity(t.len() * WIDTH);
+        for row in t {
+            for (j, &x) in row.iter().enumerate() {
+                if j < BYTE_COLS {
+                    counts[x as usize] += 1;
+                }
+                v.push(F::from_u32(x));
+            }
+        }
+        mains.push(RowMajorMatrix::new(v, WIDTH));
+    }
+    let airs = all_airs::<F>(st);
+    let mut degs: Vec<usize> = traces.iter().map(|t| t.len().trailing_zeros() as usize).collect();
+    degs.push(8);
+    let mut mats = mains;
+    mats.push(ByteTableAir::from_counts(&counts));
+    for a in &airs[6..] {
+        let LaneAirs::Public(p) = a else { unreachable!() };
+        degs.push(p.log_rows);
+        mats.push(p.trace());
+    }
+    (airs, mats, degs)
+}
+
+/// The 11 AIRs of the single proof, from the statement alone.
+pub fn all_airs<F: Field>(st: &StateStatement) -> Vec<LaneAirs<F>> {
+    let mut v: Vec<LaneAirs<F>> = (0..5).map(|l| LaneAirs::State(StateLaneAir { lane: l })).collect();
+    v.push(LaneAirs::Bytes(ByteTableAir));
+    v.extend((0..5).map(|l| LaneAirs::Public(PublicAir::new(st, l))));
+    v
+}
+
+fn all_degrees(st: &StateStatement, p: &Params) -> Vec<usize> {
+    let mut d = vec![p.log_rows; 5];
+    d.push(8);
+    d.extend((0..5).map(|l| PublicAir::<crate::config::BabyBear>::new(st, l).log_rows));
+    d
+}
+
 /// The AIRs the verifier builds from the statement alone (no trace).
 pub fn lane_airs<F: Field>(st: &StateStatement, lane: usize) -> Vec<LaneAirs<F>> {
-    vec![LaneAirs::State(StateLaneAir), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(PublicAir::new(st, lane))]
+    vec![LaneAirs::State(StateLaneAir { lane: lane as u32 }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(PublicAir::new(st, lane))]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -314,6 +365,33 @@ macro_rules! backend {
                 StateProof { lanes: std::array::from_fn(|l| prove_lane::<BabyBear>(st, &traces[l], l, p)) }
             }
 
+            /// All 5 lanes in ONE batch proof (one FRI, one set of openings): what the Groth16
+            /// circuit verifies, since its cost grows with the number of proofs and queries.
+            pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> BatchProof<Config<BabyBear>> {
+                for t in traces {
+                    assert_eq!(t.len(), 1 << p.log_rows);
+                }
+                let cfg = config::<BabyBear>(p.log_blowup, p.queries);
+                let (airs, traces, degs) = all_instance::<BabyBear>(st, traces);
+                let pd = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
+                let refs: Vec<&RowMajorMatrix<BabyBear>> = traces.iter().collect();
+                let inst = StarkInstance::new_multiple(&airs, &refs, &vec![vec![]; airs.len()]);
+                prove_batch(&cfg, &inst, &pd).expect("prove")
+            }
+
+            /// Verifies a `prove_one` proof that `st` takes `old_root` to `new_root`.
+            pub fn verify_one(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &BatchProof<Config<BabyBear>>, p: &Params) -> bool {
+                if !(p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize && st.well_formed(1 << p.log_rows) && &st.old_root() == old_root && &st.new_root() == new_root) {
+                    return false;
+                }
+                let cfg = config::<BabyBear>(p.log_blowup, p.queries);
+                let airs = all_airs::<BabyBear>(st);
+                let Ok(pd) = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup) else {
+                    return false;
+                };
+                verify_batch(&cfg, &airs, proof, &vec![vec![]; airs.len()], &pd.common).is_ok()
+            }
+
             /// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).
             pub fn verify(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &StateProof, p: &Params) -> bool {
                 p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize
@@ -376,6 +454,28 @@ mod tests {
         let mut bad = st.clone();
         assert!(bad.lanes[4].pop().is_some());
         assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[4], 4, &P), "dropped tx");
+    }
+
+    #[test]
+    fn one_proof_for_all_lanes_verifies_and_forgeries_do_not() {
+        let (st, traces) = case(1100, 8);
+        let proof = super::keccak::prove_one(&st, &traces, &P);
+        let ok = |s: &StateStatement| super::keccak::verify_one(s, &s.old_root(), &s.new_root(), &proof, &P);
+        assert!(ok(&st), "honest");
+        let mut bad = st.clone();
+        bad.states[3][4].balance += 1;
+        assert!(!ok(&bad), "intermediate table");
+        let mut bad = st.clone();
+        bad.lanes[0][5].amount += 1;
+        assert!(!ok(&bad), "tx amount");
+        let mut bad = st.clone();
+        let tx = bad.lanes[4].pop().unwrap();
+        assert!(!ok(&bad), "dropped tx");
+        // moving a tx to another lane must not verify (lane tags separate the buses)
+        bad.lanes[3].push(tx);
+        assert!(!ok(&bad), "tx moved across lanes");
+        let proof = super::poseidon2_bn254::prove_one(&st, &traces, &P);
+        assert!(super::poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &P));
     }
 
     #[test]

@@ -82,3 +82,24 @@ Shënim për qarkun Groth16: kostoja në qark varet kryesisht nga numri i provav
 një gadget i vetëm aritmetike BabyBear (më pak kod, më pak rrezik), jo 3–5× më pak kufizime vetë.
 Ulja reale vjen nga bashkimi i 5 korsive në një provë të vetme (një trace më i gjatë ose një
 batch) dhe nga më pak query (p.sh. blowup 16 × 25), gjë që po e bëj te P4b.
+
+## P4b hapi 1: të 5 korsitë në NJË provë
+
+`keccak::prove_one` / `poseidon2_bn254::prove_one` (`p3/src/state.rs`) provojnë të 5 korsitë në
+një batch proof të vetëm (11 AIR: 5 gjendje, 1 tabelë bajtesh e përbashkët, 5 publike). Tuplet
+"mem" dhe "tx" fillojnë me numrin e korsisë, kështu që rreshtat e një korsie nuk anulojnë ata të
+një tjetre (testi: tx e zhvendosur në korsi tjetër refuzohet). Qarku Groth16 tani verifikon 1 FRI
+në vend të 5.
+
+20,000 transferta, native (Poseidon2-BN254, të gjitha ~100 bit):
+
+| FRI | Prove (5 prova) | Prove (1 provë) | Verify (1 provë) |
+|---|---|---|---|
+| blowup 2 × 100 | 4.5 s | 2.7 s | 0.22 s |
+| blowup 4 × 50 | | 5.2 s | 0.16 s |
+| blowup 8 × 34 | | 10.1 s | 0.14 s |
+| blowup 16 × 25 | | 20.3 s | 0.14 s |
+
+Me Keccak, 1 provë, blowup 2 × 100: 0.16 s (kundrejt 0.23 s me 5 prova).
+Query-të më të pakta e ulin qarkun afërsisht në proporcion (100 → 25 = ~4×), por e rrisin kohën e
+provimit; zgjedhja përfundimtare bëhet pasi të matim qarkun.
