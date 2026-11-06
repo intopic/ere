@@ -17,7 +17,11 @@
 
 use super::p3batch_var::{batch_shape, batch_witness, verify_batch_var, BatchShape, BatchWitness, PublicIo};
 use super::settle_circuit::bind_header;
-use super::statement_var::{StatementShape, StatementVar};
+use super::par::{self, h, slot, Cs, Merged, Par, H, R};
+use super::statement_var::{p3_layout, src_value, Cell, Src, StatementShape, StatementVar};
+use super::fp31::M31;
+use num_bigint::BigUint;
+use std::collections::BTreeMap;
 use crate::public_input::BatchHeader;
 use ark_bn254::Fr;
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
@@ -75,25 +79,106 @@ pub struct P3SettleCircuit<'a> {
 
 impl ConstraintSynthesizer<Fr> for P3SettleCircuit<'_> {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
-        let x = FpVar::new_input(cs.clone(), || self.header.map(|h| h.public_input()).ok_or(SynthesisError::AssignmentMissing))?;
-        let t0 = std::time::Instant::now();
-        let stmt = StatementVar::witness(&cs, self.st, self.shape.statement)?;
-        if std::env::var("P3_STAGES").is_ok() {
-            eprintln!("  statement                    {:>10} constraints {:>7.2} s", cs.num_constraints(), t0.elapsed().as_secs_f64());
-        }
-        let limbs = stmt.digest_limbs()?;
-        let io = PublicIo {
-            public_values: self.shape.batch.public_values.iter().map(|_| limbs.clone()).collect(),
-            periodic: self.shape.batch.inst.iter().map(|s| s.public_lane.map(|l| stmt.p3_public_cols(l)).unwrap_or_default()).collect(),
-        };
-        let commits = verify_batch_var(&cs, &self.shape.batch, self.proof, &io)?;
-        let mut s = PoseidonSpongeVar::new(cs.clone(), poseidon_config());
-        let mut v = vec![stmt.digest.clone()];
-        v.extend(commits.0);
-        s.absorb(&v)?;
-        let v_umt = s.squeeze_field_elements(1)?.remove(0);
-        bind_header(&cs, &x, &stmt.old_root, &stmt.new_root, &v_umt, self.header)
+        synth(self.shape, self.st, self.proof, self.header, &cs, &Par::Inline(cs.clone()))
     }
+}
+
+/// The same circuit synthesised on several threads (statement, instances at zeta, FRI query
+/// groups), merged into one system: same constraints up to the links between the parts.
+pub fn synthesize_parallel(shape: &P3SettleShape, st: Option<&StateStatement>, proof: Option<&BatchWitness>, header: Option<&BatchHeader>, setup: bool) -> R<Merged> {
+    par::synthesize(setup, |cs, p| synth(shape, st, proof, header, cs, p))
+}
+
+/// The statement's values the rest of the circuit reads.
+struct StmtOut {
+    digest: FpVar<Fr>,
+    old_root: FpVar<Fr>,
+    new_root: FpVar<Fr>,
+    limbs: Vec<FpVar<Fr>>,
+    cols: Vec<Vec<Vec<M31>>>,
+}
+
+fn stages(name: &str, cs: &Cs, t0: std::time::Instant) {
+    if std::env::var("P3_STAGES").is_ok() {
+        eprintln!("  {name:<28} {:>10} constraints {:>7.2} s", cs.num_constraints(), t0.elapsed().as_secs_f64());
+    }
+}
+
+/// Inline: the statement in the parent. Threads: parent slots for the digest, roots, limbs and
+/// every statement value a public table reads, filled by a child that builds `StatementVar`.
+fn statement<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement>, cs: &Cs, par: &Par<'s, 'e>) -> R<StmtOut> {
+    let lanes: Vec<Option<usize>> = shape.batch.inst.iter().map(|s| s.public_lane).collect();
+    if par.is_inline() {
+        let t0 = std::time::Instant::now();
+        let stmt = StatementVar::witness(cs, st, shape.statement.clone())?;
+        stages("statement", cs, t0);
+        return Ok(StmtOut {
+            limbs: stmt.digest_limbs()?,
+            cols: lanes.iter().map(|l| l.map(|l| stmt.p3_public_cols(l)).unwrap_or_default()).collect(),
+            digest: stmt.digest.clone(),
+            old_root: stmt.old_root.clone(),
+            new_root: stmt.new_root.clone(),
+        });
+    }
+    let fr = |f: fn(&StateStatement) -> [u8; 32]| st.map(|st| hash_to_fr(&f(st)));
+    let digest = slot(cs, fr(StateStatement::digest))?;
+    let old_root = slot(cs, fr(StateStatement::old_root))?;
+    let new_root = slot(cs, fr(StateStatement::new_root))?;
+    let native_limbs = st.map(ss_rap_p3::state::digest_limbs);
+    let limbs: Vec<FpVar<Fr>> = (0..ss_rap_p3::state::DIGEST_LIMBS).map(|k| slot(cs, native_limbs.as_ref().map(|l| Fr::from(l[k] as u64)))).collect::<R<_>>()?;
+    let layouts: Vec<Option<Vec<Vec<Cell>>>> = lanes.iter().map(|l| l.map(|l| p3_layout(&shape.statement, l))).collect();
+    let mut srcs: BTreeMap<Src, FpVar<Fr>> = BTreeMap::new();
+    for c in layouts.iter().flatten().flatten().flatten() {
+        if let Cell::Var(src, _) = c {
+            if !srcs.contains_key(src) {
+                srcs.insert(*src, slot(cs, st.map(|st| Fr::from(src_value(st, *src))))?);
+            }
+        }
+    }
+    let cols = layouts
+        .iter()
+        .map(|l| {
+            l.iter()
+                .flatten()
+                .map(|c| c.iter().map(|cell| match cell {
+                    Cell::Const(v) => M31::constant(*v, 0),
+                    Cell::Var(src, bits) => M31 { v: srcs[src].clone(), bound: BigUint::from(1u64) << *bits, ch: 0 },
+                }).collect())
+                .collect()
+        })
+        .collect();
+    let hd = (h(cs, &digest)?, h(cs, &old_root)?, h(cs, &new_root)?);
+    let hl: Vec<H> = limbs.iter().map(|l| h(cs, l)).collect::<R<_>>()?;
+    let hs: Vec<(Src, H)> = srcs.iter().map(|(s, v)| Ok((*s, h(cs, v)?))).collect::<R<_>>()?;
+    par.spawn(move |io| {
+        let t0 = std::time::Instant::now();
+        let stmt = StatementVar::witness(&io.cs, st, shape.statement.clone())?;
+        io.export(&stmt.digest, &hd.0)?;
+        io.export(&stmt.old_root, &hd.1)?;
+        io.export(&stmt.new_root, &hd.2)?;
+        for (l, t) in stmt.digest_limbs()?.iter().zip(&hl) {
+            io.export(l, t)?;
+        }
+        for (s, t) in &hs {
+            io.export(stmt.src(*s), t)?;
+        }
+        stages("statement (thread)", &io.cs, t0);
+        Ok(())
+    })?;
+    Ok(StmtOut { digest, old_root, new_root, limbs, cols })
+}
+
+fn synth<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement>, proof: Option<&'e BatchWitness>, header: Option<&BatchHeader>, cs: &Cs, par: &Par<'s, 'e>) -> R<()> {
+    let x = FpVar::new_input(cs.clone(), || header.map(|h| h.public_input()).ok_or(SynthesisError::AssignmentMissing))?;
+    let so = statement(shape, st, cs, par)?;
+    let io = PublicIo { public_values: shape.batch.public_values.iter().map(|_| so.limbs.clone()).collect(), periodic: so.cols };
+    let commits = verify_batch_var(cs, &shape.batch, proof, &io, par)?;
+    let mut s = PoseidonSpongeVar::new(cs.clone(), poseidon_config());
+    let mut v = vec![so.digest.clone()];
+    v.extend(commits.0);
+    s.absorb(&v)?;
+    let v_umt = s.squeeze_field_elements(1)?.remove(0);
+    bind_header(cs, &x, &so.old_root, &so.new_root, &v_umt, header)
 }
 
 #[cfg(test)]
@@ -140,5 +225,26 @@ mod tests {
         let mut bw = w.clone();
         bw.fri.query_pow_witness = (bw.fri.query_pow_witness + 1) % 2013265921;
         assert!(!sat(P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&bw), header: Some(&h) }).0, "bad proof of work");
+
+        // the parallel synthesis: same statement, merged from the threads' parts
+        let m = synthesize_parallel(&shape, Some(&st), Some(&w), Some(&h), false).unwrap();
+        assert!(m.is_satisfied(), "honest batch, parallel (first unsatisfied: {:?})", m.first_unsatisfied());
+        let np = m.matrices.num_constraints;
+        eprintln!("parallel synthesis: {np} constraints ({:+} vs inline: links are free, inline exports are equalities)", np as i64 - n as i64);
+        assert!(np.abs_diff(n) < n / 100);
+        let setup = synthesize_parallel(&shape, None, None, None, true).unwrap();
+        assert_eq!(setup.matrices.num_constraints, np);
+        assert_eq!(setup.matrices.num_witness_variables, m.matrices.num_witness_variables);
+        assert_eq!(setup.matrices.a, m.matrices.a, "setup and proving matrices");
+        let mut bw = w.clone();
+        bw.inst[1].main_local[3][2] = (bw.inst[1].main_local[3][2] + 5) % 2013265921;
+        assert!(!synthesize_parallel(&shape, Some(&st), Some(&bw), Some(&h), false).unwrap().is_satisfied(), "forged opening, parallel");
+        let mut st2 = st.clone();
+        st2.states[ss_rap_v2::DEFAULT_RNS_CHANNELS][1].balance += 1;
+        let h2 = BatchHeader { new_state_root: st2.new_root(), v_umt_root: v_umt_root(&st2, &w), ..h.clone() };
+        assert!(!synthesize_parallel(&shape, Some(&st2), Some(&w), Some(&h2), false).unwrap().is_satisfied(), "statement the proof is not about, parallel");
+        let mut bad = h.clone();
+        bad.new_state_root[0] ^= 1;
+        assert!(!synthesize_parallel(&shape, Some(&st), Some(&w), Some(&bad), false).unwrap().is_satisfied(), "other new root, parallel");
     }
 }

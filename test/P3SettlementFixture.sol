@@ -14,14 +14,14 @@ library P3SettlementFixture {
     uint256 internal constant PUBLIC_INPUT = 0x124106799e0f5d2e131334a6f993dcad30034fad5f89ae64363e6aba48944fcb;
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x2268a1654d85ef0d7411986e8956bb98cb033edb492f7085c508b0eb0fa182fb), uint256(0x23d0f82a22f319f2aa4bab61a43767f3aec0f48d973b4578b3acb79c0e8ef614)];
+        p = [uint256(0x1305d2c66d1af7e6f0f0fede1cf4c2839a36478028f87d118f5bf3ec970fac06), uint256(0x1bd3934a29047859f2d0fef79816b956e08111f7fe78d735bc43820d61975c00)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
-        p = [[uint256(0x153d3c701b3aedd08546c6ec54bc89cf973be9b236334527df0220bb106c3646), uint256(0x0d32ebc66c2588a957310a6b47d2586f5aebdeb121a3a2b01460f825d62385fa)], [uint256(0x2e6b1e6973aa6c1c6b23b2e0700afae7830ed74cc8986b96e27352d0200322e0), uint256(0x13ff20f1af1ad68ad23a9f1de17d72ed8b5f4c7a582d8f26c94fb3b4394a6771)]];
+        p = [[uint256(0x2d31259c185b2c25ce68279784116f9151fcd4b2b2a2f47bedc33c3c1369986c), uint256(0x21b6702bd44969f0ea8beacbe8586afe33d4a6caa5f2eabcf34e0a5a8c657cb0)], [uint256(0x11114b875fa9ff4f25d3345f1f7cb33e1af20cffcddbd5d6489e326da0cc1bb0), uint256(0x06b39bf07c459059d9e2cd0633329fb60eab368f6dbc6d08cca535f5bf4014e5)]];
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x2a74f801ac92f5497d1704f0e9563728157ff7e9424d2afa037489c3055db93b), uint256(0x036b2c0919a8a70c875b27e4f5076e17045c3182139a552b31cf08fb9cd948df)];
+        p = [uint256(0x0fc6fd61c6ff31c026022c2a2b515f12fd14585389fca6f51e1a8dc5f35c5359), uint256(0x1fe2fb4edd7cd5c9dfcaf77691f36ff400c7066c100f9e030768d72c463e4edb)];
     }
 }

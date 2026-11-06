@@ -126,6 +126,73 @@ fn root(cs: &ConstraintSystemRef<Fr>, addrs: &[FpVar<Fr>], table: &[AccountVar])
     Ok(h)
 }
 
+/// Where a public-table cell comes from in the statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Src {
+    /// nonce of account `id` in state table `t`
+    Nonce(usize, usize),
+    /// balance byte `k` of account `id` in state table `t`
+    Byte(usize, usize, usize),
+    /// final timestamp of account `id` in lane `l`
+    Ts(usize, usize),
+    From(usize, usize),
+    To(usize, usize),
+    TxNonce(usize, usize),
+    /// amount byte `k` of transfer `j` in lane `l`
+    Amt(usize, usize, usize),
+}
+
+/// A cell of a public table: a constant of the shape, or a statement value of at most `bits` bits.
+#[derive(Clone, Copy, Debug)]
+pub enum Cell {
+    Const(u32),
+    Var(Src, u64),
+}
+
+/// The columns of `ss_rap_p3::state::PublicAir::new(st, lane)` for any statement of shape
+/// `shape`: initial accounts (weight -1), final accounts (+1), then the lane's transfers (+1),
+/// padded with zero rows to the height of the largest lane's table (`public_rows`).
+pub fn p3_layout(shape: &StatementShape, lane: usize) -> Vec<Vec<Cell>> {
+    const P: u32 = 2013265921;
+    let k = |c: u32| Cell::Const(c);
+    let zeros = |n: usize| vec![k(0); n];
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    for (t, w) in [(lane, P - 1), (lane + 1, 1)] {
+        for id in 0..shape.accounts {
+            let ts = if t == lane { k(0) } else { Cell::Var(Src::Ts(lane, id), 31) };
+            let mut r = vec![k(id as u32), Cell::Var(Src::Nonce(t, id), 30), ts];
+            r.extend((0..8).map(|b| Cell::Var(Src::Byte(t, id, b), 8)));
+            r.push(k(w));
+            r.extend(zeros(13));
+            rows.push(r);
+        }
+    }
+    for j in 0..shape.lane_txs[lane] {
+        let mut r = zeros(12);
+        r.extend([k(j as u32 + 1), Cell::Var(Src::From(lane, j), 31), Cell::Var(Src::To(lane, j), 31), Cell::Var(Src::TxNonce(lane, j), 30)]);
+        r.extend((0..8).map(|b| Cell::Var(Src::Amt(lane, j, b), 8)));
+        r.push(k(1));
+        rows.push(r);
+    }
+    // as `ss_rap_p3::state::public_rows`
+    let n = shape.lane_txs.iter().map(|&t| 2 * shape.accounts + t).max().unwrap().next_power_of_two().max(4);
+    rows.resize(n, zeros(25));
+    (0..25).map(|j| rows.iter().map(|r| r[j]).collect()).collect()
+}
+
+/// The value of a cell's source in `st`.
+pub fn src_value(st: &StateStatement, s: Src) -> u64 {
+    match s {
+        Src::Nonce(t, id) => st.states[t][id].nonce as u64,
+        Src::Byte(t, id, k) => (st.states[t][id].balance >> (8 * k)) & 0xff,
+        Src::Ts(l, id) => st.final_ts[l][id] as u64,
+        Src::From(l, j) => st.lanes[l][j].from as u64,
+        Src::To(l, j) => st.lanes[l][j].to as u64,
+        Src::TxNonce(l, j) => st.lanes[l][j].nonce as u64,
+        Src::Amt(l, j, k) => (st.lanes[l][j].amount >> (8 * k)) & 0xff,
+    }
+}
+
 impl StatementVar {
     pub fn witness(cs: &ConstraintSystemRef<Fr>, st: Option<&StateStatement>, shape: StatementShape) -> R<Self> {
         let k = shape.accounts;
@@ -216,37 +283,33 @@ impl StatementVar {
         out
     }
 
-    /// The periodic columns of `ss_rap_p3::state::PublicAir::new(st, lane)` (BabyBear): initial
-    /// accounts (weight -1), final accounts (+1), then the lane's transfers (+1), padded with
-    /// zero rows to the height of the largest lane's table (a power of two, at least 4).
+    /// The periodic columns of `ss_rap_p3::state::PublicAir::new(st, lane)` (BabyBear), see
+    /// `p3_layout`.
     pub fn p3_public_cols(&self, lane: usize) -> Vec<Vec<M31>> {
-        const P: u32 = 2013265921;
-        let val = |x: &Int, bits: u64| M31 { v: x.v.clone(), bound: BigUint::from(1u64) << bits, ch: 0 };
-        let k = |c: u32| M31::constant(c, 0);
-        let zeros = |n: usize| vec![k(0); n];
-        let mut rows: Vec<Vec<M31>> = Vec::new();
-        for (t, w) in [(lane, P - 1), (lane + 1, 1)] {
-            for (id, s) in self.states[t].iter().enumerate() {
-                let ts = if t == lane { k(0) } else { val(&self.final_ts[lane][id], 31) };
-                let mut r = vec![k(id as u32), val(&s.nonce, 30), ts];
-                r.extend(s.bytes.iter().map(|b| val(b, 8)));
-                r.push(k(w));
-                r.extend(zeros(13));
-                rows.push(r);
-            }
+        p3_layout(&self.shape, lane)
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|cell| match cell {
+                        Cell::Const(v) => M31::constant(*v, 0),
+                        Cell::Var(src, bits) => M31 { v: self.src(*src).clone(), bound: BigUint::from(1u64) << *bits, ch: 0 },
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The witnessed integer behind a public-table cell.
+    pub fn src(&self, s: Src) -> &FpVar<Fr> {
+        match s {
+            Src::Nonce(t, id) => &self.states[t][id].nonce.v,
+            Src::Byte(t, id, k) => &self.states[t][id].bytes[k].v,
+            Src::Ts(l, id) => &self.final_ts[l][id].v,
+            Src::From(l, j) => &self.lanes[l][j].from.v,
+            Src::To(l, j) => &self.lanes[l][j].to.v,
+            Src::TxNonce(l, j) => &self.lanes[l][j].nonce.v,
+            Src::Amt(l, j, k) => &self.lanes[l][j].bytes[k].v,
         }
-        for (j, tx) in self.lanes[lane].iter().enumerate() {
-            let mut r = zeros(12);
-            r.extend([k(j as u32 + 1), val(&tx.from, 31), val(&tx.to, 31), val(&tx.nonce, 30)]);
-            r.extend(tx.bytes.iter().map(|b| val(b, 8)));
-            r.push(k(1));
-            rows.push(r);
-        }
-        // as `ss_rap_p3::state::public_rows`: the height of the largest lane's table
-        let k_acc = self.shape.accounts;
-        let n = self.shape.lane_txs.iter().map(|&t| 2 * k_acc + t).max().unwrap().next_power_of_two().max(4);
-        rows.resize(n, zeros(25));
-        (0..25).map(|j| rows.iter().map(|r| r[j].clone()).collect()).collect()
     }
 
     /// The digest as `ss_rap_p3::state::digest_limbs` (30-bit limbs of its canonical bits).

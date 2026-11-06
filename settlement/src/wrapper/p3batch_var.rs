@@ -18,6 +18,7 @@
 
 use super::challenger_var::ChallengerVar;
 use super::fp31::{E4, M31};
+use super::par::{he4, hm31, slot_e4, Io, Par, HE4, HM31};
 use super::p3air_eval::{pow_u32, recompose, selectors, Ctx, Eval, Point, EF, F, R};
 use super::p3fri_var::{bn_to_fr, e4_const, e4_inverse, e4_witness, ef_u32, fri_witness, observe_e4, sample_e4, verify_pcs, FriProofVar, FriShape, FriWitness, MatShape, TWO_ADIC_GENERATORS};
 use ark_bn254::Fr;
@@ -373,62 +374,151 @@ fn is_const_zero(m: &M31) -> bool {
     matches!(&m.v, FpVar::Constant(c) if c.is_zero())
 }
 
-type Weights = std::collections::HashMap<(usize, usize), (Vec<E4>, E4)>;
-
-/// Periodic columns (one period of p = 2^log_p values, as circuit values) at zeta, by the
-/// barycentric formula P(w) = (w^p - 1)/p * sum_i v_i g^i/(w - g^i), w = zeta^(n/p). The
-/// inverses 1/(w - g^i) depend on (log_n, log_p) only and are shared through `cache`.
-fn periodic_var(ctx: &mut CircuitCtx, cache: &mut Weights, cols: &[Vec<M31>], zeta: &E4, log_n: usize) -> R<Vec<E4>> {
-    if cols.is_empty() {
-        return Ok(vec![]);
-    }
-    let p = cols[0].len();
-    assert!(cols.iter().all(|c| c.len() == p) && p.is_power_of_two());
-    let log_p = p.trailing_zeros() as usize;
+/// 1 / (w - g^i) for the subgroup of size 2^log_p and (w^p - 1) / p, w = zeta^(2^(log_n - log_p)).
+fn periodic_weights(ctx: &mut CircuitCtx, zeta: &E4, log_n: usize, log_p: usize) -> R<(Vec<E4>, E4)> {
+    let p = 1usize << log_p;
     let g = TWO_ADIC_GENERATORS[log_p];
-    if !cache.contains_key(&(log_n, log_p)) {
-        let mut w = zeta.clone();
-        for _ in log_p..log_n {
-            w = ctx.mul(&w, &w)?;
-        }
-        let mut wp = w.clone();
-        for _ in 0..log_p {
-            wp = ctx.mul(&wp, &wp)?;
-        }
-        let one = ctx.base(1);
-        let num = ctx.sub(&wp, &one)?;
-        let factor = ctx.scale(&num, pow_u32(p as u32, (super::challenger_var::P - 2) as u64))?;
-        let mut invs = Vec::with_capacity(p);
-        let mut gi = 1u32;
-        for _ in 0..p {
-            let c = ctx.base(gi);
-            let d = ctx.sub(&w, &c)?;
-            invs.push(ctx.inv(&d)?);
-            gi = ((gi as u64 * g as u64) % super::challenger_var::P) as u32;
-        }
-        cache.insert((log_n, log_p), (invs, factor));
+    let mut w = zeta.clone();
+    for _ in log_p..log_n {
+        w = ctx.mul(&w, &w)?;
     }
-    let (invs, factor) = cache.get(&(log_n, log_p)).unwrap().clone();
+    let mut wp = w.clone();
+    for _ in 0..log_p {
+        wp = ctx.mul(&wp, &wp)?;
+    }
+    let one = ctx.base(1);
+    let num = ctx.sub(&wp, &one)?;
+    let factor = ctx.scale(&num, pow_u32(p as u32, (super::challenger_var::P - 2) as u64))?.reduce(&ctx.cs)?;
+    let mut invs = Vec::with_capacity(p);
+    let mut gi = 1u32;
+    for _ in 0..p {
+        let c = ctx.base(gi);
+        let d = ctx.sub(&w, &c)?;
+        invs.push(ctx.inv(&d)?);
+        gi = ((gi as u64 * g as u64) % super::challenger_var::P) as u32;
+    }
+    Ok((invs, factor))
+}
+
+/// `periodic_weights` natively (canonical values).
+fn periodic_weights_native(zeta: [u32; 4], log_n: usize, log_p: usize) -> (Vec<[u32; 4]>, [u32; 4]) {
+    let z = EF::from_basis_coefficients_slice(&zeta.map(F::from_u32)).unwrap();
+    let mut w = z;
+    for _ in log_p..log_n {
+        w = w * w;
+    }
+    let p = 1usize << log_p;
+    let wp = w.exp_power_of_2(log_p);
+    let factor = (wp - EF::ONE) * F::from_u32(p as u32).inverse();
+    let g = F::from_u32(TWO_ADIC_GENERATORS[log_p]);
+    let mut gi = F::ONE;
+    let mut invs = Vec::with_capacity(p);
+    for _ in 0..p {
+        invs.push(ef_u32((w - EF::from(gi)).inverse()));
+        gi *= g;
+    }
+    (invs, ef_u32(factor))
+}
+
+/// Periodic columns at zeta from the weights: (w^p - 1)/p * sum_i v_i g^i / (w - g^i).
+fn periodic_sums(ctx: &mut CircuitCtx, cols: &[Vec<M31>], invs: &[E4], factor: &E4) -> R<Vec<E4>> {
     let mut out = Vec::with_capacity(cols.len());
     for col in cols {
+        assert_eq!(col.len(), invs.len());
+        let g = TWO_ADIC_GENERATORS[col.len().trailing_zeros() as usize];
         let mut acc = e4_const([0; 4]);
         let mut gi = 1u32;
-        for (v, inv) in col.iter().zip(&invs) {
+        for (v, inv) in col.iter().zip(invs) {
             if !is_const_zero(v) {
                 acc = acc.add(&inv.mul_base(&v.mul_const(gi)));
             }
             gi = ((gi as u64 * g as u64) % super::challenger_var::P) as u32;
         }
-        out.push(ctx.mul(&acc, &factor)?);
+        out.push(ctx.mul(&acc, factor)?);
     }
     Ok(out)
+}
+
+/// An instance's opened values as handles.
+struct InstH {
+    main_local: Vec<HE4>,
+    main_next: Vec<HE4>,
+    pre_local: Vec<HE4>,
+    pre_next: Vec<HE4>,
+    perm_local: Vec<HE4>,
+    perm_next: Vec<HE4>,
+    chunks: Vec<Vec<HE4>>,
+    terminal: Option<HE4>,
+}
+
+impl InstH {
+    fn import(&self, io: &mut Io) -> R<InstVars> {
+        let e = |io: &mut Io, v: &[HE4]| v.iter().map(|x| io.import_e4(x)).collect::<R<Vec<_>>>();
+        Ok(InstVars {
+            main_local: e(io, &self.main_local)?,
+            main_next: e(io, &self.main_next)?,
+            pre_local: e(io, &self.pre_local)?,
+            pre_next: e(io, &self.pre_next)?,
+            perm_local: e(io, &self.perm_local)?,
+            perm_next: e(io, &self.perm_next)?,
+            chunks: self.chunks.iter().map(|c| e(io, c)).collect::<R<_>>()?,
+            terminal: self.terminal.as_ref().map(|t| io.import_e4(t)).transpose()?,
+        })
+    }
+}
+
+/// sum_k alpha^k C_k(zeta) / Z_H(zeta) equals the quotient recomposed from its chunks.
+#[allow(clippy::too_many_arguments)]
+fn check_instance(ctx: &mut CircuitCtx, s: &InstShape, v: &InstVars, zeta: &E4, alpha: &E4, lb: &E4, prefix: &[E4], periodic: Vec<E4>) -> R<()> {
+    let [first, last, trans, inv_van] = selectors(ctx, zeta, s.log_n)?;
+    let rec = |ctx: &mut CircuitCtx, flat: &[E4]| flat.chunks(4).map(|c| recompose(ctx, c)).collect::<R<Vec<_>>>();
+    let pt = Point {
+        main_local: v.main_local.clone(),
+        main_next: if s.main_next { v.main_next.clone() } else { vec![e4_const([0; 4]); s.width] },
+        pre_local: v.pre_local.clone(),
+        pre_next: if s.pre_next { v.pre_next.clone() } else { vec![e4_const([0; 4]); s.pre_width] },
+        perm_local: rec(ctx, &v.perm_local)?,
+        perm_next: rec(ctx, &v.perm_next)?,
+        challenges: prefix.iter().flat_map(|p| [p.clone(), lb.clone()]).collect(),
+        perm_values: v.terminal.iter().cloned().collect(),
+        periodic,
+        is_first_row: first,
+        is_last_row: last,
+        is_transition: trans,
+    };
+    let folded = Eval::new(ctx, &pt).fold(&s.base, &s.ext, alpha)?;
+    let lhs = ctx.mul(&folded, &inv_van)?;
+    // quotient = sum_k zp_k chunk_k, zp_k = prod_{j != k} Z_j(zeta) / Z_j(first_k)
+    let mut vz = Vec::with_capacity(s.n_chunks);
+    for j in 0..s.n_chunks {
+        let mut x = ctx.scale(zeta, s.chunk_shift_inv[j])?;
+        for _ in 0..s.log_n {
+            x = ctx.mul(&x, &x)?;
+        }
+        let one = ctx.base(1);
+        vz.push(ctx.sub(&x, &one)?);
+    }
+    let mut quotient = ctx.base(0);
+    for k in 0..s.n_chunks {
+        let mut zp = ctx.base(1);
+        for j in 0..s.n_chunks {
+            if j != k {
+                let t = ctx.scale(&vz[j], s.chunk_cross[k][j])?;
+                zp = ctx.mul(&zp, &t)?;
+            }
+        }
+        let c = recompose(ctx, &v.chunks[k])?;
+        let t = ctx.mul(&zp, &c)?;
+        quotient = ctx.add(&quotient, &t)?;
+    }
+    lhs.sub(&quotient).assert_zero(&ctx.cs)
 }
 
 /// The commitments of the proof as circuit values: main, permutation, quotient, then the FRI
 /// commit-phase commitments (what `v_umt_root` binds).
 pub struct ProofCommits(pub Vec<FpVar<Fr>>);
 
-pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Option<&BatchWitness>, io: &PublicIo) -> R<ProofCommits> {
+pub fn verify_batch_var<'s, 'e: 's>(cs: &ConstraintSystemRef<Fr>, shape: &'e BatchShape, w: Option<&'e BatchWitness>, io: &PublicIo, par: &Par<'s, 'e>) -> R<ProofCommits> {
     let fr = |x: Option<Fr>| FpVar::new_witness(cs.clone(), || x.ok_or(ark_relations::r1cs::SynthesisError::AssignmentMissing));
     let main = fr(w.map(|w| w.main))?;
     let perm = fr(w.map(|w| w.perm))?;
@@ -538,7 +628,7 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         vals.pop();
         commits.pop();
     }
-    verify_pcs(cs, &mut ch, &shape.fri, &commits, &pts, &vals, &fri)?;
+    verify_pcs(cs, &mut ch, &shape.fri, &commits, &pts, &vals, &fri, w.map(|w| &w.fri), par)?;
     stage("opening argument (PCS/FRI)", &mut n0);
 
     // 3. constraints at zeta
@@ -553,58 +643,79 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         acc = ctx.add(&acc, &gamma)?.reduce(cs)?;
         prefix.push(acc.clone());
     }
-    let mut cache = Weights::new();
+    // barycentric weights per (trace height, period): a child computes them, the parent holds
+    // them in slots (values computed natively) so every instance child can import them
+    let zeta_val = zeta.value();
+    let mut weights: Vec<((usize, usize), Vec<HE4>, HE4)> = Vec::new();
     for (i, s) in shape.inst.iter().enumerate() {
-        let v = &iv[i];
-        let [first, last, trans, inv_van] = selectors(&mut ctx, &zeta, s.log_n)?;
+        if io.periodic[i].is_empty() {
+            continue;
+        }
         assert_eq!(io.periodic[i].len(), s.periodic.len());
         assert!(io.periodic[i].iter().zip(&s.periodic).all(|(a, b)| a.len() == b.len()), "periodic columns of another shape");
-        let (pn, pt0) = (cs.num_constraints(), std::time::Instant::now());
-        let periodic = periodic_var(&mut ctx, &mut cache, &io.periodic[i], &zeta, s.log_n)?;
-        if std::env::var("P3_STAGES").is_ok() && !io.periodic[i].is_empty() {
-            eprintln!("    periodic of instance {i:2}       {:>10} {:>7.2} s", cs.num_constraints() - pn, pt0.elapsed().as_secs_f64());
+        let log_p = io.periodic[i][0].len().trailing_zeros() as usize;
+        let key = (s.log_n, log_p);
+        if weights.iter().any(|w| w.0 == key) {
+            continue;
         }
-        let rec = |ctx: &mut CircuitCtx, flat: &[E4]| flat.chunks(4).map(|c| recompose(ctx, c)).collect::<R<Vec<_>>>();
-        let pt = Point {
-            main_local: v.main_local.clone(),
-            main_next: if s.main_next { v.main_next.clone() } else { vec![e4_const([0; 4]); s.width] },
-            pre_local: v.pre_local.clone(),
-            pre_next: if s.pre_next { v.pre_next.clone() } else { vec![e4_const([0; 4]); s.pre_width] },
-            perm_local: rec(&mut ctx, &v.perm_local)?,
-            perm_next: rec(&mut ctx, &v.perm_next)?,
-            challenges: s.bus.iter().flat_map(|&b| [prefix[b].clone(), lb.clone()]).collect(),
-            perm_values: v.terminal.iter().cloned().collect(),
-            periodic,
-            is_first_row: first,
-            is_last_row: last,
-            is_transition: trans,
+        let native = zeta_val.map(|z| periodic_weights_native(z, s.log_n, log_p));
+        let p31 = BigUint::from(super::challenger_var::P);
+        let invs: Vec<E4> = (0..1usize << log_p).map(|k| slot_e4(cs, native.as_ref().map(|n| n.0[k]), p31.clone())).collect::<R<_>>()?;
+        let factor = slot_e4(cs, native.as_ref().map(|n| n.1), BigUint::from(1u64 << 31))?;
+        let (invs_h, factor_h): (Vec<HE4>, HE4) = (invs.iter().map(|x| he4(cs, x)).collect::<R<_>>()?, he4(cs, &factor)?);
+        let zeta_h = he4(cs, &zeta)?;
+        let (ih, fh) = (invs_h.clone(), factor_h.clone());
+        par.spawn(move |io: &mut Io| {
+            let z = io.import_e4(&zeta_h)?;
+            let mut ctx = CircuitCtx { cs: io.cs.clone() };
+            let (invs, factor) = periodic_weights(&mut ctx, &z, key.0, key.1)?;
+            for (x, t) in invs.iter().zip(&ih) {
+                io.export_e4(x, t)?;
+            }
+            io.export_e4(&factor, &fh)
+        })?;
+        weights.push((key, invs_h, factor_h));
+    }
+    // one child per instance: selectors, periodic columns, AIR + LogUp constraints, quotient
+    let zeta_h = he4(cs, &zeta)?;
+    let alpha_h = he4(cs, &alpha)?;
+    let lb_h = he4(cs, &lb)?;
+    let prefix_h: Vec<HE4> = prefix.iter().map(|x| he4(cs, x)).collect::<R<_>>()?;
+    for (i, s) in shape.inst.iter().enumerate() {
+        let v = &iv[i];
+        let hv = |xs: &[E4]| xs.iter().map(|x| he4(cs, x)).collect::<R<Vec<_>>>();
+        let vh = InstH {
+            main_local: hv(&v.main_local)?,
+            main_next: hv(&v.main_next)?,
+            pre_local: hv(&v.pre_local)?,
+            pre_next: hv(&v.pre_next)?,
+            perm_local: hv(&v.perm_local)?,
+            perm_next: hv(&v.perm_next)?,
+            chunks: v.chunks.iter().map(|c| hv(c)).collect::<R<_>>()?,
+            terminal: v.terminal.as_ref().map(|t| he4(cs, t)).transpose()?,
         };
-        let folded = Eval::new(&mut ctx, &pt).fold(&s.base, &s.ext, &alpha)?;
-        let lhs = ctx.mul(&folded, &inv_van)?;
-        // quotient = sum_k zp_k chunk_k, zp_k = prod_{j != k} Z_j(zeta) / Z_j(first_k)
-        let mut vz = Vec::with_capacity(s.n_chunks);
-        for j in 0..s.n_chunks {
-            let mut x = ctx.scale(&zeta, s.chunk_shift_inv[j])?;
-            for _ in 0..s.log_n {
-                x = ctx.mul(&x, &x)?;
-            }
-            let one = ctx.base(1);
-            vz.push(ctx.sub(&x, &one)?);
-        }
-        let mut quotient = ctx.base(0);
-        for k in 0..s.n_chunks {
-            let mut zp = ctx.base(1);
-            for j in 0..s.n_chunks {
-                if j != k {
-                    let t = ctx.scale(&vz[j], s.chunk_cross[k][j])?;
-                    zp = ctx.mul(&zp, &t)?;
+        let cols: Vec<Vec<HM31>> = io.periodic[i].iter().map(|c| c.iter().map(|m| hm31(cs, m)).collect::<R<_>>()).collect::<R<_>>()?;
+        let wts = if cols.is_empty() { None } else { weights.iter().find(|w| w.0 == (s.log_n, cols[0].len().trailing_zeros() as usize)).map(|w| (w.1.clone(), w.2.clone())) };
+        let (zeta_h, alpha_h, lb_h) = (zeta_h.clone(), alpha_h.clone(), lb_h.clone());
+        let prefix_i: Vec<HE4> = s.bus.iter().map(|&b| prefix_h[b].clone()).collect();
+        par.spawn(move |io: &mut Io| {
+            let zeta = io.import_e4(&zeta_h)?;
+            let alpha = io.import_e4(&alpha_h)?;
+            let lb = io.import_e4(&lb_h)?;
+            let prefix: Vec<E4> = prefix_i.iter().map(|x| io.import_e4(x)).collect::<R<_>>()?;
+            let v = vh.import(io)?;
+            let cols: Vec<Vec<M31>> = cols.iter().map(|c| c.iter().map(|m| io.import_m31(m)).collect::<R<_>>()).collect::<R<_>>()?;
+            let mut ctx = CircuitCtx { cs: io.cs.clone() };
+            let periodic = match &wts {
+                None => vec![],
+                Some((ih, fh)) => {
+                    let invs: Vec<E4> = ih.iter().map(|x| io.import_e4(x)).collect::<R<_>>()?;
+                    let factor = io.import_e4(fh)?;
+                    periodic_sums(&mut ctx, &cols, &invs, &factor)?
                 }
-            }
-            let c = recompose(&mut ctx, &v.chunks[k])?;
-            let t = ctx.mul(&zp, &c)?;
-            quotient = ctx.add(&quotient, &t)?;
-        }
-        lhs.sub(&quotient).assert_zero(cs)?;
+            };
+            check_instance(&mut ctx, s, &v, &zeta, &alpha, &lb, &prefix, periodic)
+        })?;
     }
 
     stage("constraints at zeta", &mut n0);
@@ -637,7 +748,7 @@ mod tests {
         let run = |io_st: &StateStatement, w: &BatchWitness| {
             let cs = ConstraintSystem::<Fr>::new_ref();
             let io = PublicIo::constant(&batch_shape(io_st, &p, &proof.degree_bits, &ops), io_st);
-            verify_batch_var(&cs, &shape, Some(w), &io).unwrap();
+            verify_batch_var(&cs, &shape, Some(w), &io, &super::super::par::Par::Inline(cs.clone())).unwrap();
             (cs.is_satisfied().unwrap(), cs.num_constraints())
         };
         let (ok, n) = run(&st, &w);

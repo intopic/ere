@@ -6,14 +6,13 @@
 //!   test/P3SettlementFixture.sol     -- header, public input and Groth16 proof
 //! Deterministic: CI re-runs it and fails if the files are out of date. Small shape and few FRI
 //! queries so it runs in CI; NOT the production parameters. `P3_COUNT_ONLY=1` stops after
-//! counting constraints (any shape).
+//! counting constraints on one thread (any shape); `P3_SYNTH_ONLY=1` stops after the parallel
+//! witness generation and its satisfiability check.
 
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use ss_rap_p3::state::Params;
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
 use ss_rap_settlement::public_input::BatchHeader;
@@ -40,26 +39,48 @@ fn main() {
     let shape = P3SettleShape::new(&st, &p, &proof, &ops);
     let w = p3settle::witness(&shape, &proof, &ops);
     let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [0x01; 32], batch_number: 1, chain_id: 31337 };
-    let circ = || P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) };
 
-    let count_only = std::env::var("P3_COUNT_ONLY").is_ok();
-    let cs = ConstraintSystem::<Fr>::new_ref();
-    if count_only {
-        // count without storing the matrices (large shapes)
+    let print_head = || {
+        println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);
+        println!("  Plonky3 prove (Poseidon2-BN254) : {:.0} ms", t_stark.as_secs_f64() * 1e3);
+    };
+    if std::env::var("P3_COUNT_ONLY").is_ok() {
+        // one thread, without storing the matrices (any shape)
+        let cs = ConstraintSystem::<Fr>::new_ref();
         cs.set_mode(ark_relations::r1cs::SynthesisMode::Prove { construct_matrices: false });
+        let t0 = Instant::now();
+        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
+        print_head();
+        println!("  constraints                     : {} (satisfied: not checked)", cs.num_constraints());
+        println!("  witness generation (1 thread)   : {:.1} s", t0.elapsed().as_secs_f64());
+        return;
     }
+    if std::env::var("P3_INLINE").is_ok() {
+        // one thread, with the matrices Groth16 needs (the comparison point for the parallel path)
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_optimization_goal(ark_relations::r1cs::OptimizationGoal::Constraints);
+        let t0 = Instant::now();
+        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
+        let t_gen = t0.elapsed();
+        cs.finalize();
+        let mx = cs.to_matrices().unwrap();
+        print_head();
+        println!("  constraints                     : {}", mx.num_constraints);
+        println!("  witness generation (1 thread)   : {:.1} s ({:.1} s synthesis + {:.1} s matrices)", t0.elapsed().as_secs_f64(), t_gen.as_secs_f64(), (t0.elapsed() - t_gen).as_secs_f64());
+        return;
+    }
+    // witness generation on several threads (statement, instances at zeta, FRI query groups)
     let t0 = Instant::now();
-    circ().generate_constraints(cs.clone()).unwrap();
+    let m = p3settle::synthesize_parallel(&shape, Some(&st), Some(&w), Some(&h), false).unwrap();
     let t_synth = t0.elapsed();
-    let n = cs.num_constraints();
-    let ok = count_only || cs.is_satisfied().unwrap();
-    drop(cs);
-    println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);
-    println!("  Plonky3 prove (Poseidon2-BN254) : {:.0} ms", t_stark.as_secs_f64() * 1e3);
-    println!("  constraints                     : {n} (satisfied: {})", if count_only { "not checked".to_string() } else { ok.to_string() });
-    println!("  witness generation              : {:.1} s", t_synth.as_secs_f64());
-    assert!(ok);
-    if count_only {
+    let t0 = Instant::now();
+    let ok = m.is_satisfied();
+    let t_check = t0.elapsed();
+    print_head();
+    println!("  constraints                     : {} (satisfied: {ok})", m.matrices.num_constraints);
+    println!("  witness generation (parallel)   : {:.1} s ({} threads; satisfiability check {:.1} s)", t_synth.as_secs_f64(), rayon::current_num_threads(), t_check.as_secs_f64());
+    assert!(ok, "first unsatisfied constraint: {:?}", m.first_unsatisfied());
+    if std::env::var("P3_SYNTH_ONLY").is_ok() {
         return;
     }
 
@@ -67,8 +88,7 @@ fn main() {
     let (pk, vk) = groth16::p3_dev_setup(&shape);
     let t_setup = t0.elapsed();
     let t0 = Instant::now();
-    let mut rng = ChaCha20Rng::seed_from_u64(1);
-    let g = Groth16::<Bn254>::prove(&pk, circ(), &mut rng).unwrap();
+    let g = groth16::p3_prove_merged(&pk, &m, 1);
     let t_prove = t0.elapsed();
     let x = h.public_input();
     let t0 = Instant::now();

@@ -1250,6 +1250,7 @@ dependencies = [
  "p3-uni-stark",
  "p3-util",
  "rand_chacha",
+ "rayon",
  "ss_rap_p3",
  "ss_rap_v2",
  "tiny-keccak",

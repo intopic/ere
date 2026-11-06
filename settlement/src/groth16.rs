@@ -61,9 +61,22 @@ pub const P3_DEV_SETUP_SEED: [u8; 32] = *b"SS-RAP-v2-PLONKY3-WRAPPER-UNSAFE";
 /// Reproducible setup of the Plonky3 settlement circuit (`wrapper::p3settle`) for one shape.
 /// NOT SECURE (public seed): tests and CI only.
 pub fn p3_dev_setup(shape: &crate::wrapper::p3settle::P3SettleShape) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
-    let mut rng = ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED);
-    let c = crate::wrapper::p3settle::P3SettleCircuit { shape, st: None, proof: None, header: None };
-    Groth16::<Bn254>::circuit_specific_setup(c, &mut rng).expect("setup")
+    let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, true).expect("synthesis");
+    p3_setup_from_matrices(&m.matrices, &mut ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED))
+}
+
+/// Groth16 setup of a merged R1CS (`wrapper::par::synthesize`).
+pub fn p3_setup_from_matrices<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(m: &ark_relations::r1cs::ConstraintMatrices<Fr>, rng: &mut R) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+    Groth16::<Bn254>::circuit_specific_setup(crate::wrapper::par::MatrixCircuit(m), rng).expect("setup")
+}
+
+/// Groth16 proof of a merged, satisfied R1CS with its full assignment.
+pub fn p3_prove_merged(pk: &ProvingKey<Bn254>, m: &crate::wrapper::par::Merged, seed: u64) -> Proof<Bn254> {
+    use ark_std::UniformRand;
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let (r, s) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+    let mx = &m.matrices;
+    Groth16::<Bn254>::create_proof_with_reduction_and_matrices(pk, r, s, mx, mx.num_instance_variables, mx.num_constraints, &m.assignment).expect("prove")
 }
 
 pub fn prove(pk: &ProvingKey<Bn254>, public_input: Fr, seed: u64) -> Proof<Bn254> {

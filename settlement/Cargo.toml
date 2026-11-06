@@ -13,6 +13,7 @@ ark-groth16 = { version = "0.5", features = ["parallel"] }
 ark-relations = "0.5"
 ark-snark = "0.5"
 ark-std = { version = "0.5", features = ["parallel"] }
+rayon = "1.10"
 ark-serialize = "0.5"
 ark-r1cs-std = "0.5"
 ark-crypto-primitives = { version = "0.5", default-features = false, features = ["sponge", "r1cs"] }

@@ -172,3 +172,37 @@ siguri e konjekturuar 100 bit = log_blowup × queries + 16 bit grinding):
 Zgjedhja: blowup 8 × 28 + 16 bit grinding (qarku 2× më i vogël se blowup 2). Me ~2.4M kufizime
 Groth16 merr ~37 s dhe ~8 GB në 4 bërthama CPU; 15M kufizime në CPU janë rreth 4–5 min dhe
 ~40–50 GB RAM, prandaj forma 20k shkon me GPU (RTX 4090, hapi 5) ose në një makinë me më shumë RAM.
+
+Pas tabelave publike me lartësi të njëjtë për të 5 korsitë, forma 20k ka 13.98M kufizime.
+
+## Gjenerimi paralel i witness-it
+
+arkworks e sintetizon një `ConstraintSystem` në një fije, dhe `finalize` (inlinimi i LC-ve për
+matricat) kushton më shumë se vetë sinteza. `wrapper::par` e ndan qarkun në pjesë që sintetizohen
+në fije të veçanta dhe pastaj bashkohen në një R1CS të vetme:
+
+- prindi alokon "slot"-e për vlerat që i duhen (vlerat native i llogarit vetë), fëmija i lidh
+  variablat e tij me to (`export`); fëmija merr vlera të prindit me `import`. Lidhja është e njëjta
+  kolonë në matricën e bashkuar, pra pa kufizim shtesë;
+- pjesët: statement-i (fëmijë, prindi merr digest-in, rrënjët, limbat dhe çdo vlerë që lexon një
+  tabelë publike), çdo instancë në zeta, peshat periodike, grupet e query-ve FRI (`P3_QUERY_GROUPS`,
+  default 4); prindi mban transkriptin, PCS-në deri te shumat dhe keccak-un e header-it;
+- prindi finalizohet ndërsa fëmijët ende punojnë; bashkimi rindërton kolonat në vend;
+- Groth16: setup me `MatrixCircuit` (rishfaq matricat), prove me
+  `create_proof_with_reduction_and_matrices`. Rezultati është deterministik (renditja sipas
+  fëmijës, jo sipas bërthamave), CI-ja e kontrollon fixture-in.
+
+Testi: sistemi i bashkuar plotësohet për provën e ndershme dhe nuk plotësohet për hapje të
+falsifikuar, statement tjetër ose rrënjë tjetër; setup dhe prove japin të njëjtat matrica.
+
+Matjet (4 bërthama, 15 GB RAM, `P3_INLINE=1` / `P3_SYNTH_ONLY=1`):
+
+| Forma | Kufizime | 1 fije (me matrica) | Paralel | RAM |
+|---|---|---|---|---|
+| 40 tx (fixture) | 2.31M | 12.9 s (4.0 sintezë + 8.9 matrica) | 9.2 s | — |
+| 1k tx, blowup 8 × 28 + 16 | 5.37M | OOM (>15 GB) | 12.7 s | 13.9 GB |
+| 20k tx, blowup 8 × 28 + 16 | 13.98M | OOM | OOM | — |
+
+Pa matrica (vetëm numërim) 20k kërkon 17.8 s në një fije, por Groth16 i do matricat. Në 1k puna
+totale CPU është ~50 s, pra paralelizimi jep ~4× në 4 bërthama dhe shkallëzohet me bërthamat.
+Forma 20k kërkon makinë me më shumë RAM (≥64 GB) për çdo rrugë, CPU apo GPU.
