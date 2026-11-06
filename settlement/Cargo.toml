@@ -25,5 +25,8 @@ blake3 = "1.5"
 ss_rap_p3 = { path = "../p3" }
 p3-bn254 = "=0.9.0-rc.2"
 p3-field = "=0.9.0-rc.2"
+p3-baby-bear = "=0.9.0-rc.2"
+p3-commit = "=0.9.0-rc.2"
+p3-matrix = "=0.9.0-rc.2"
 p3-symmetric = "=0.9.0-rc.2"
 num-bigint-05 = { package = "num-bigint", version = "0.5" }

@@ -84,3 +84,9 @@ where
     };
     StarkConfig::new(Pcs::new(Radix2DitParallel::default(), mmcs, fri), Challenger::new(p).unwrap())
 }
+
+/// The Merkle commitment scheme of `config` (for tests of the circuit).
+pub fn config_mmcs<F: PrimeField32>() -> ValMmcs<F> {
+    let p = perm();
+    ValMmcs::<F>::new(Hash::new(p.clone()).unwrap(), Compress::new(p), 0)
+}
