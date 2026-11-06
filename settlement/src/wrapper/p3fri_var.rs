@@ -269,11 +269,15 @@ pub fn verify_pcs(
     let rounds = shape.rounds();
     assert!(shape.batches.iter().flatten().all(|m| m.log_size > 0), "a degree-1 matrix needs the zero check");
     let mut tally = [0usize; 5];
+    let mut secs = [0f64; 5];
     let mut mark = cs.num_constraints();
+    let mut tmark = std::time::Instant::now();
     let mut tick = |k: usize, tally: &mut [usize; 5]| {
         let n = cs.num_constraints();
         tally[k] += n - mark;
         mark = n;
+        secs[k] += tmark.elapsed().as_secs_f64();
+        tmark = std::time::Instant::now();
     };
 
     // 1. transcript
@@ -450,7 +454,7 @@ pub fn verify_pcs(
     }
     if std::env::var("P3_STAGES").is_ok() {
         for (k, name) in ["pcs transcript + sums at z", "input Merkle openings", "reduced openings", "commit-phase Merkle", "folding"].iter().enumerate() {
-            eprintln!("    {name:28} {:>10}", tally[k]);
+            eprintln!("    {name:28} {:>10} {:>7.2} s", tally[k], secs[k]);
         }
     }
     Ok(())

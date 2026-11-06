@@ -450,11 +450,13 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
     }
     let fri = FriProofVar::witness(cs, &shape.fri, w.map(|w| &w.fri))?;
 
-    let stage = |name: &str, n0: &mut usize| {
+    let mut t0 = std::time::Instant::now();
+    let mut stage = |name: &str, n0: &mut usize| {
         if std::env::var("P3_STAGES").is_ok() {
-            eprintln!("  {name:28} {:>10} constraints", cs.num_constraints() - *n0);
+            eprintln!("  {name:28} {:>10} constraints {:>7.2} s", cs.num_constraints() - *n0, t0.elapsed().as_secs_f64());
         }
         *n0 = cs.num_constraints();
+        t0 = std::time::Instant::now();
     };
     let mut n0 = 0usize;
     stage("witness allocation", &mut n0);
@@ -557,7 +559,11 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         let [first, last, trans, inv_van] = selectors(&mut ctx, &zeta, s.log_n)?;
         assert_eq!(io.periodic[i].len(), s.periodic.len());
         assert!(io.periodic[i].iter().zip(&s.periodic).all(|(a, b)| a.len() == b.len()), "periodic columns of another shape");
+        let (pn, pt0) = (cs.num_constraints(), std::time::Instant::now());
         let periodic = periodic_var(&mut ctx, &mut cache, &io.periodic[i], &zeta, s.log_n)?;
+        if std::env::var("P3_STAGES").is_ok() && !io.periodic[i].is_empty() {
+            eprintln!("    periodic of instance {i:2}       {:>10} {:>7.2} s", cs.num_constraints() - pn, pt0.elapsed().as_secs_f64());
+        }
         let rec = |ctx: &mut CircuitCtx, flat: &[E4]| flat.chunks(4).map(|c| recompose(ctx, c)).collect::<R<Vec<_>>>();
         let pt = Point {
             main_local: v.main_local.clone(),

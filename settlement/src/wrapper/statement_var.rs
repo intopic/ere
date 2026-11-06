@@ -217,8 +217,8 @@ impl StatementVar {
     }
 
     /// The periodic columns of `ss_rap_p3::state::PublicAir::new(st, lane)` (BabyBear): initial
-    /// accounts (weight -1), final accounts (+1), then the lane's transfers (+1), padded to a
-    /// power of two (at least 4) with zero rows.
+    /// accounts (weight -1), final accounts (+1), then the lane's transfers (+1), padded with
+    /// zero rows to the height of the largest lane's table (a power of two, at least 4).
     pub fn p3_public_cols(&self, lane: usize) -> Vec<Vec<M31>> {
         const P: u32 = 2013265921;
         let val = |x: &Int, bits: u64| M31 { v: x.v.clone(), bound: BigUint::from(1u64) << bits, ch: 0 };
@@ -242,7 +242,9 @@ impl StatementVar {
             r.push(k(1));
             rows.push(r);
         }
-        let n = rows.len().next_power_of_two().max(4);
+        // as `ss_rap_p3::state::public_rows`: the height of the largest lane's table
+        let k_acc = self.shape.accounts;
+        let n = self.shape.lane_txs.iter().map(|&t| 2 * k_acc + t).max().unwrap().next_power_of_two().max(4);
         rows.resize(n, zeros(25));
         (0..25).map(|j| rows.iter().map(|r| r[j].clone()).collect()).collect()
     }

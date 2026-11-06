@@ -76,7 +76,11 @@ pub struct P3SettleCircuit<'a> {
 impl ConstraintSynthesizer<Fr> for P3SettleCircuit<'_> {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let x = FpVar::new_input(cs.clone(), || self.header.map(|h| h.public_input()).ok_or(SynthesisError::AssignmentMissing))?;
+        let t0 = std::time::Instant::now();
         let stmt = StatementVar::witness(&cs, self.st, self.shape.statement)?;
+        if std::env::var("P3_STAGES").is_ok() {
+            eprintln!("  statement                    {:>10} constraints {:>7.2} s", cs.num_constraints(), t0.elapsed().as_secs_f64());
+        }
         let limbs = stmt.digest_limbs()?;
         let io = PublicIo {
             public_values: self.shape.batch.public_values.iter().map(|_| limbs.clone()).collect(),

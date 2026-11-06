@@ -115,6 +115,13 @@ pub fn public_values<F: Field>(st: &StateStatement, airs: &[LaneAirs<F>]) -> Vec
     airs.iter().map(|a| if a.num_public_values() > 0 { limbs.clone() } else { vec![] }).collect()
 }
 
+/// Height of every lane's public table: initial + final accounts + the largest lane's
+/// transfers, as a power of two (at least 4).
+pub fn public_rows(st: &StateStatement) -> usize {
+    let k = st.addrs.len();
+    st.lanes.iter().map(|l| 2 * k + l.len()).max().unwrap_or(0).next_power_of_two().max(4)
+}
+
 /// The public side of the "mem" and "tx" buses for lane `lane`, as periodic columns.
 #[derive(Clone, Debug)]
 pub struct PublicAir<F> {
@@ -154,7 +161,9 @@ impl<F: Field> PublicAir<F> {
             r.push(F::ONE);
             rows.push(r);
         }
-        let n = rows.len().next_power_of_two().max(4);
+        // every lane's public table has the height of the largest one: one evaluation domain
+        // for all 5 (a verifier shares the barycentric weights)
+        let n = public_rows(st);
         rows.resize(n, vec![F::ZERO; PUB_COLS]);
         let cols = (0..PUB_COLS).map(|j| rows.iter().map(|r| r[j]).collect()).collect();
         Self { cols, log_rows: n.trailing_zeros() as usize, lane: lane as u32 }
