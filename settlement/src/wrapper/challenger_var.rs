@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(p3_field::max_absorb_injective_limbs::<BabyBear, p3_bn254::Bn254>(), ABSORB);
         assert_eq!(p3_field::squeeze_field_order_num_limbs::<p3_bn254::Bn254, BabyBear>(), SQUEEZE);
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
-        let p = ss_rap_p3::state::Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3 };
+        let p = ss_rap_p3::state::Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = ss_rap_p3::record::prove_one(&st, &traces, &p);
         let (ok, ops) = ss_rap_p3::record::verify_one(&st, &proof, &p);
         assert!(ok);

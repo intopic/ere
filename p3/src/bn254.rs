@@ -70,6 +70,15 @@ pub fn config<F>(log_blowup: usize, queries: usize) -> Config<F>
 where
     F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
 {
+    config_pow(log_blowup, queries, 0)
+}
+
+/// `config` with `query_pow` bits of grinding before the query indices are drawn (conjectured
+/// security log_blowup * queries + query_pow bits).
+pub fn config_pow<F>(log_blowup: usize, queries: usize, query_pow: usize) -> Config<F>
+where
+    F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
+{
     let p = perm();
     let mmcs = ValMmcs::<F>::new(Hash::new(p.clone()).unwrap(), Compress::new(p.clone()), 0);
     let fri = FriParameters {
@@ -79,7 +88,7 @@ where
         num_queries: queries,
         batch_proof_of_work_bits: 0,
         commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
+        query_proof_of_work_bits: query_pow,
         mmcs: ChallengeMmcs::new(mmcs.clone()),
     };
     StarkConfig::new(Pcs::new(Radix2DitParallel::default(), mmcs, fri), Challenger::new(p).unwrap())

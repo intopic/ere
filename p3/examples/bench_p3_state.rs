@@ -24,7 +24,7 @@ fn main() {
         .collect();
     let sp = state::params(n, 2, 50);
     let (st, traces) = build(&addrs, &old, &txs, sp.log_rows, true).unwrap();
-    let p = Params { log_rows: sp.log_rows as usize, log_blowup, queries, budget: 3 };
+    let p = Params { log_rows: sp.log_rows as usize, log_blowup, queries, budget: 3, query_pow: 0 };
     let t0 = Instant::now();
     let proof = prove(&st, &traces, &p);
     let pt = t0.elapsed();

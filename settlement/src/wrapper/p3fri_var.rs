@@ -165,6 +165,8 @@ pub struct FriShape {
     pub queries: usize,
     pub pcs_seed: Vec<u32>,
     pub fri_seed: Vec<u32>,
+    /// grinding bits before the query indices (0: none)
+    pub query_pow: usize,
 }
 
 impl FriShape {
@@ -189,6 +191,7 @@ pub struct FriWitness {
     pub siblings: Vec<Vec<[u32; 4]>>,
     /// [query][round] -> sibling digests
     pub round_paths: Vec<Vec<Vec<Fr>>>,
+    pub query_pow_witness: u32,
 }
 
 pub struct QueryVar {
@@ -201,6 +204,7 @@ pub struct QueryVar {
 pub struct FriProofVar {
     pub commit_phase_commits: Vec<FpVar<Fr>>,
     pub final_poly: E4,
+    pub query_pow_witness: M31,
     queries: Vec<QueryVar>,
 }
 
@@ -229,8 +233,21 @@ impl FriProofVar {
             let round_paths = (0..rounds).map(|r| (0..log_max - r - 1).map(|i| fr(w.map(|w| w.round_paths[q][r][i]))).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
             queries.push(QueryVar { input_rows, input_paths, siblings, round_paths });
         }
-        Ok(Self { commit_phase_commits, final_poly, queries })
+        let query_pow_witness = bb_witness(cs, w.map(|w| w.query_pow_witness))?;
+        Ok(Self { commit_phase_commits, final_poly, query_pow_witness, queries })
     }
+}
+
+/// Identity of a point: the variables (or constants) of its coordinates.
+type PointKey = Vec<(Option<ark_relations::r1cs::Variable>, Option<Fr>)>;
+
+fn point_key(z: &E4) -> PointKey {
+    z.c.iter()
+        .map(|m| match &m.v {
+            FpVar::Var(a) => (Some(a.variable), None),
+            FpVar::Constant(c) => (None, Some(*c)),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -251,6 +268,13 @@ pub fn verify_pcs(
     let log_max = shape.log_max();
     let rounds = shape.rounds();
     assert!(shape.batches.iter().flatten().all(|m| m.log_size > 0), "a degree-1 matrix needs the zero check");
+    let mut tally = [0usize; 5];
+    let mut mark = cs.num_constraints();
+    let mut tick = |k: usize, tally: &mut [usize; 5]| {
+        let n = cs.num_constraints();
+        tally[k] += n - mark;
+        mark = n;
+    };
 
     // 1. transcript
     for &s in &shape.pcs_seed {
@@ -275,6 +299,13 @@ pub fn verify_pcs(
         betas.push(sample_e4(ch)?);
     }
     observe_e4(ch, &proof.final_poly)?;
+    if shape.query_pow > 0 {
+        // check_witness: observe the witness, the next `query_pow` sampled bits are all zero
+        ch.observe(&proof.query_pow_witness.v)?;
+        for b in ch.sample_bits(shape.query_pow)? {
+            b.enforce_equal(&Boolean::FALSE)?;
+        }
+    }
     let mut indices = Vec::with_capacity(shape.queries);
     for _ in 0..shape.queries {
         indices.push(ch.sample_bits(log_max)?);
@@ -316,6 +347,7 @@ pub fn verify_pcs(
         }
     }
 
+    tick(0, &mut tally);
     // 3. queries
     let betas_sq: Vec<E4> = betas.iter().map(|b| b.mul(b).reduce(cs)).collect::<Result<_, _>>()?;
     let half = M31::constant(((P + 1) / 2) as u32, CH);
@@ -328,35 +360,63 @@ pub fn verify_pcs(
             let rows: Vec<Vec<FpVar<Fr>>> = qv.input_rows[b].iter().map(|r| r.iter().map(|x| x.v.clone()).collect()).collect();
             verify_batch_var(&commits[b], &heights, &bits[log_max - hb..], &rows, &qv.input_paths[b])?;
         }
-        // reduced openings per height
-        let mut ro = std::collections::BTreeMap::<usize, E4>::new();
+        tick(1, &mut tally);
+        // reduced openings per height: sum over (matrix, point) of (sum_z - sum_x) / (z - x).
+        // Terms with the same height and the same point variable share 1 / (z - x) and one
+        // reduction; x depends on the height only.
+        // s_0 = g_{log_max}^rev(index >> 1, log_max - 1) (the first fold's twiddle) and
+        // y_max = g_{log_max}^rev(index, log_max) = (-1)^bit0 s_0; for a lower height lh,
+        // y_lh = y_max^(2^(log_max - lh)) and x = GENERATOR * y_lh.
+        let rev_bits: Vec<Boolean<Fr>> = (0..log_max - 1).map(|i| bits[log_max - 1 - i].clone()).collect();
+        let s0 = pow_bits(cs, TWO_ADIC_GENERATORS[log_max], &rev_bits)?;
+        let sign = M31 { v: FpVar::from(bits[0].clone()) * Fr::from(P - 2) + Fr::from(1u64), bound: BigUint::from(P), ch: CH };
+        let mut ys = std::collections::BTreeMap::<usize, M31>::new();
+        let mut y = s0.mul(&sign).reduce(cs)?;
+        for lh in (1..=log_max).rev() {
+            ys.insert(lh, y.clone());
+            if lh > 1 {
+                y = y.mul(&y).reduce(cs)?;
+            }
+        }
+        let mut xs = std::collections::BTreeMap::<usize, M31>::new();
+        let mut groups: Vec<((usize, PointKey), &E4, E4)> = Vec::new();
         let mut red = reductions.iter();
         for (b, mats) in shape.batches.iter().enumerate() {
             for (m, ms) in mats.iter().enumerate() {
                 let lh = ms.log_size + shape.log_blowup;
-                // x = GENERATOR * g_lh^rev(index >> (log_max - lh), lh)
-                let rev_bits: Vec<Boolean<Fr>> = (0..lh).map(|i| bits[log_max - 1 - i].clone()).collect();
-                let x = pow_bits(cs, TWO_ADIC_GENERATORS[lh], &rev_bits)?.mul_const(GENERATOR).reduce(cs)?;
+                if !xs.contains_key(&lh) {
+                    xs.insert(lh, ys[&lh].mul_const(GENERATOR).reduce(cs)?);
+                }
                 let row = &qv.input_rows[b][m];
                 for i in 0..ms.num_points {
                     let (_, start, sum_z) = red.next().unwrap();
-                    let inv = e4_inverse(cs, &points[b][m][i].sub(&E4::from_base(&x)))?;
-                    let mut sum_x: Option<E4> = None;
+                    let mut d = sum_z.clone();
                     for k in 0..ms.width {
-                        let t = alpha_pow[start + k].mul_base(&row[k]);
-                        sum_x = Some(match sum_x {
-                            None => t,
-                            Some(a) => a.add(&t),
-                        });
+                        d = d.sub(&alpha_pow[start + k].mul_base(&row[k]));
                     }
-                    let term = sum_z.sub(&sum_x.unwrap()).reduce(cs)?.mul(&inv).reduce(cs)?;
-                    let e = ro.remove(&lh).map(|a| a.add(&term)).unwrap_or(term);
-                    ro.insert(lh, e);
+                    let key = (lh, point_key(&points[b][m][i]));
+                    match groups.iter_mut().find(|g| g.0 == key) {
+                        Some(g) => g.2 = g.2.add(&d),
+                        None => groups.push((key, &points[b][m][i], d)),
+                    }
                 }
             }
         }
+        let mut ro = std::collections::BTreeMap::<usize, E4>::new();
+        for ((lh, _), z, d) in groups {
+            let inv = e4_inverse(cs, &z.sub(&E4::from_base(&xs[&lh])))?;
+            let term = d.reduce(cs)?.mul(&inv);
+            let e = ro.remove(&lh).map(|a| a.add(&term)).unwrap_or(term);
+            ro.insert(lh, e);
+        }
+        let ro_n = ro.len();
+        let mut ro: std::collections::BTreeMap<usize, E4> = ro.into_iter().map(|(k, v)| Ok((k, v.reduce(cs)?))).collect::<Result<_, SynthesisError>>()?;
+        assert_eq!(ro.len(), ro_n);
+        tick(2, &mut tally);
         // folding
         let mut folded = e4_canon(cs, ro.remove(&log_max).as_ref().expect("an opening at the max height"))?;
+        // 1 / s_r from 1 / s_0: s_{r+1} = s_r^2 (-1)^bit_{r+1}
+        let mut inv_s = bb_inverse(cs, &s0)?;
         for r in 0..rounds {
             let l = log_max - r; // height before this fold
             let bit = &bits[r];
@@ -365,23 +425,32 @@ pub fn verify_pcs(
             let hi = e4_select(bit, &folded, sib)?;
             // the pair opens under this round's commitment at index >> (r + 1)
             let leaf: Vec<FpVar<Fr>> = lo.c.iter().chain(hi.c.iter()).map(|x| x.v.clone()).collect();
+            tick(4, &mut tally);
             verify_batch_var(&proof.commit_phase_commits[r], &[1 << (l - 1)], &bits[r + 1..log_max], &[leaf], &qv.round_paths[r])?;
-            // s = g_l^rev(index >> (r + 1), l - 1)
-            let rev_bits: Vec<Boolean<Fr>> = (0..l - 1).map(|i| bits[log_max - 1 - i].clone()).collect();
-            let s = pow_bits(cs, TWO_ADIC_GENERATORS[l], &rev_bits)?;
-            let inv_2s = bb_inverse(cs, &s.mul_const(2).reduce(cs)?)?;
-            // (lo + hi) / 2 + (lo - hi) beta / (2 s)
+            tick(3, &mut tally);
+            // (lo + hi) / 2 + (lo - hi) beta / (2 s), s = g_l^rev(index >> (r + 1), l - 1)
+            let inv_2s = inv_s.mul(&half);
             let sum = lo.add(&hi).mul_base(&half);
-            let diff = lo.sub(&hi).reduce(cs)?.mul(&betas[r]).reduce(cs)?.mul_base(&inv_2s);
-            let mut next = sum.add(&diff).reduce(cs)?;
+            let diff = lo.sub(&hi).mul(&betas[r]).mul_base(&inv_2s);
+            let mut next = sum.add(&diff);
             if let Some(o) = ro.remove(&(l - 1)) {
-                next = next.add(&betas_sq[r].mul(&o)).reduce(cs)?;
+                next = next.add(&betas_sq[r].mul(&o));
             }
             folded = e4_canon(cs, &next)?;
+            if r + 1 < rounds {
+                let f = M31 { v: FpVar::from(bits[r + 1].clone()) * Fr::from(P - 2) + Fr::from(1u64), bound: BigUint::from(P), ch: CH };
+                inv_s = inv_s.mul(&inv_s).mul(&f).reduce(cs)?;
+            }
         }
         assert!(ro.is_empty());
         for k in 0..4 {
             folded.c[k].v.enforce_equal(&proof.final_poly.c[k].v)?;
+        }
+        tick(4, &mut tally);
+    }
+    if std::env::var("P3_STAGES").is_ok() {
+        for (k, name) in ["pcs transcript + sums at z", "input Merkle openings", "reduced openings", "commit-phase Merkle", "folding"].iter().enumerate() {
+            eprintln!("    {name:28} {:>10}", tally[k]);
         }
     }
     Ok(())
@@ -486,6 +555,7 @@ pub fn fri_witness(shape: &FriShape, proof: &PcsProof, indices: &[usize], alpha:
         input_paths,
         siblings,
         round_paths,
+        query_pow_witness: proof.query_pow_witness.as_canonical_u32(),
     }
 }
 
@@ -532,7 +602,7 @@ mod tests {
     #[test]
     fn verifies_a_plonky3_pcs_proof() {
         let (log_blowup, queries) = (1usize, 6usize);
-        let (cfg, log) = record::config(log_blowup, queries);
+        let (cfg, log) = record::config(log_blowup, queries, 0);
         let pcs = cfg.pcs();
         // two commitments: (heights 2^5 and 2^3), (2^4)
         let mk = |h: usize, w: usize, seed: u32| RowMajorMatrix::new((0..h * w).map(|i| BabyBear::from_u32((i as u32 * 7919 + seed) % 2013265921)).collect::<Vec<_>>(), w);
@@ -568,7 +638,7 @@ mod tests {
         let batches: Vec<Vec<MatShape>> = specs.iter().zip(&pts).map(|(b, p)| b.iter().zip(p).map(|(&(lh, w), pp)| MatShape { log_size: lh, width: w, num_points: pp.len() }).collect()).collect();
         let n_claims: usize = batches.iter().flatten().map(|m| m.width * m.num_points).sum();
         let (pcs_seed, fri_seed) = seeds(&ops, n_claims);
-        let shape = FriShape { batches, log_blowup, queries, pcs_seed, fri_seed };
+        let shape = FriShape { batches, log_blowup, queries, pcs_seed, fri_seed, query_pow: 0 };
 
         let indices: Vec<usize> = ops.iter().filter_map(|o| if let Op::SampleBits(_, v) = o { Some(*v) } else { None }).collect();
         let samples: Vec<u32> = ops.iter().filter_map(|o| if let Op::Sample(v) = o { Some(*v) } else { None }).collect();

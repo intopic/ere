@@ -347,6 +347,8 @@ pub struct Params {
     pub queries: usize,
     /// Lookup packing budget (see docs/PLONKY3.md).
     pub budget: usize,
+    /// Grinding bits before the FRI query indices.
+    pub query_pow: usize,
 }
 
 fn degrees(st: &StateStatement, lane: usize, p: &Params) -> Vec<usize> {
@@ -359,7 +361,7 @@ macro_rules! backend {
             use super::*;
             use crate::config::BabyBear;
             use $cfg as cfgmod;
-            use cfgmod::{config, Config};
+            use cfgmod::{config_pow, Config};
             use p3_batch_stark::{prove_batch, verify_batch, BatchProof, ProverData, StarkInstance};
             use p3_field::extension::BinomiallyExtendable;
             use p3_field::{PrimeField32, TwoAdicField};
@@ -374,7 +376,7 @@ macro_rules! backend {
                 F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
             {
                 assert_eq!(trace.len(), 1 << p.log_rows);
-                let cfg = config::<F>(p.log_blowup, p.queries);
+                let cfg = config_pow::<F>(p.log_blowup, p.queries, p.query_pow);
                 let (airs, traces, degs) = lane_instance::<F>(st, trace, lane);
                 let pd = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; 3], p.log_blowup).unwrap();
                 let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
@@ -387,7 +389,7 @@ macro_rules! backend {
             where
                 F: PrimeField32 + TwoAdicField + BinomiallyExtendable<4>,
             {
-                let cfg = config::<F>(p.log_blowup, p.queries);
+                let cfg = config_pow::<F>(p.log_blowup, p.queries, p.query_pow);
                 let airs = lane_airs::<F>(st, lane);
                 let Ok(pd) = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degrees(st, lane, p), &vec![p.budget; 3], p.log_blowup) else {
                     return false;
@@ -406,7 +408,7 @@ macro_rules! backend {
                 for t in traces {
                     assert_eq!(t.len(), 1 << p.log_rows);
                 }
-                let cfg = config::<BabyBear>(p.log_blowup, p.queries);
+                let cfg = config_pow::<BabyBear>(p.log_blowup, p.queries, p.query_pow);
                 let (airs, traces, degs) = all_instance::<BabyBear>(st, traces);
                 let pd = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
                 let refs: Vec<&RowMajorMatrix<BabyBear>> = traces.iter().collect();
@@ -420,7 +422,7 @@ macro_rules! backend {
                 if !(p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize && st.well_formed(1 << p.log_rows) && &st.old_root() == old_root && &st.new_root() == new_root) {
                     return false;
                 }
-                let cfg = config::<BabyBear>(p.log_blowup, p.queries);
+                let cfg = config_pow::<BabyBear>(p.log_blowup, p.queries, p.query_pow);
                 let airs = all_airs::<BabyBear>(st);
                 let Ok(pd) = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup) else {
                     return false;
@@ -487,7 +489,7 @@ mod tests {
         build(&addrs, &old, &txs, log_rows, true).unwrap()
     }
 
-    const P: Params = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3 };
+    const P: Params = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
 
     #[test]
     fn state_lanes_verify_and_forged_statements_do_not() {

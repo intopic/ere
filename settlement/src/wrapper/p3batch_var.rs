@@ -136,7 +136,7 @@ fn observes(ops: &[Op]) -> Vec<u32> {
 /// the transcript log of any verification of the same shape: the seeds of Plonky3's three
 /// transcripts are read from it (they depend on the shape only).
 pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: &[Op]) -> BatchShape {
-    let (cfg, _) = record::config(p.log_blowup, p.queries);
+    let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
     let pcs = cfg.pcs();
     let airs = all_airs::<F>(st);
     let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, degree_bits, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
@@ -219,7 +219,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
     let after_alpha = pcs_alpha + 4;
     let fri_digest = after_alpha + ops[after_alpha..].iter().position(|o| matches!(o, Op::ObserveDigest(_))).unwrap();
     let fri_seed = observes(&ops[after_alpha..fri_digest]);
-    let fri = FriShape { batches, log_blowup: p.log_blowup, queries: p.queries, pcs_seed, fri_seed };
+    let fri = FriShape { batches, log_blowup: p.log_blowup, queries: p.queries, pcs_seed, fri_seed, query_pow: p.query_pow };
     BatchShape { inst, public_values, lookup_width, seed, pre_commit, pre_instances, fri }
 }
 
@@ -273,7 +273,9 @@ pub fn batch_witness(shape: &BatchShape, proof: &BatchProof<record::Config>, ops
     let s: Vec<u32> = ops.iter().filter_map(|o| if let Op::Sample(v) = o { Some(*v) } else { None }).collect();
     let e = |k: usize| EF::from_basis_coefficients_slice(&s[k..k + 4].iter().map(|&v| F::from_u32(v)).collect::<Vec<_>>()).unwrap();
     let zeta = e(12);
-    let indices: Vec<usize> = ops.iter().filter_map(|o| if let Op::SampleBits(_, v) = o { Some(*v) } else { None }).collect();
+    // the query indices are the last `queries` bit samples (a grinding check samples before them)
+    let bit_samples: Vec<usize> = ops.iter().filter_map(|o| if let Op::SampleBits(_, v) = o { Some(*v) } else { None }).collect();
+    let indices = bit_samples[bit_samples.len() - shape.fri.queries..].to_vec();
     let alpha = e(16);
     let betas: Vec<EF> = (0..shape.fri.rounds()).map(|r| e(20 + 4 * r)).collect();
     let (pts, opened) = claims_native(shape, proof, zeta);
@@ -485,7 +487,16 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
     stage("transcript (before PCS)", &mut n0);
     // 2. opening argument
     let mut ctx = CircuitCtx { cs: cs.clone() };
-    let nexts: Vec<E4> = shape.inst.iter().map(|s| ctx.scale(&zeta, TWO_ADIC_GENERATORS[s.log_n]).and_then(|x| x.reduce(cs))).collect::<R<_>>()?;
+    // g zeta per trace height (one variable per height, so the opening argument can share
+    // 1 / (g zeta - x) between instances of the same height)
+    let mut by_height = std::collections::BTreeMap::<usize, E4>::new();
+    for s in &shape.inst {
+        if !by_height.contains_key(&s.log_n) {
+            let x = ctx.scale(&zeta, TWO_ADIC_GENERATORS[s.log_n])?.reduce(cs)?;
+            by_height.insert(s.log_n, x);
+        }
+    }
+    let nexts: Vec<E4> = shape.inst.iter().map(|s| by_height[&s.log_n].clone()).collect();
     let mut pts: Vec<Vec<Vec<E4>>> = vec![vec![], vec![], vec![], vec![]];
     let mut vals: Vec<Vec<Vec<Vec<E4>>>> = vec![vec![], vec![], vec![], vec![]];
     for (i, s) in shape.inst.iter().enumerate() {
@@ -611,7 +622,7 @@ mod tests {
     #[test]
     fn verifies_the_five_lane_plonky3_proof_in_r1cs() {
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
-        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3 };
+        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = record::prove_one(&st, &traces, &p);
         let (ok, ops) = record::verify_one(&st, &proof, &p);
         assert!(ok);

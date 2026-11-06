@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn constraints_at_zeta_match_the_quotient() {
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
-        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3 };
+        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = record::prove_one(&st, &traces, &p);
         let (ok, ops) = record::verify_one(&st, &proof, &p);
         assert!(ok);
@@ -348,7 +348,7 @@ mod tests {
         let e = |k: usize| EF::from_basis_coefficients_slice(&s[k..k + 4].iter().map(|&v| F::from_u32(v)).collect::<Vec<_>>()).unwrap();
         let (la, lb, alpha, zeta) = (e(0), e(4), e(8), e(12));
 
-        let (cfg, _) = record::config(p.log_blowup, p.queries);
+        let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
         let airs = all_airs::<F>(&st);
         let degs: Vec<usize> = proof.degree_bits.clone();
         let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();

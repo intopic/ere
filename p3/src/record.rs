@@ -98,9 +98,16 @@ impl FieldChallenger<F> for Recording {}
 
 impl GrindingChallenger for Recording {
     type Witness = F;
+    /// Finds the witness with the inner challenger, then replays `check_witness` through the
+    /// recording methods so the log holds Observe(witness), SampleBits(bits, 0).
     fn grind(&mut self, bits: usize) -> F {
-        assert_eq!(bits, 0, "the recorded configuration has no proof of work");
-        F::default()
+        if bits == 0 {
+            return F::default();
+        }
+        let w = self.inner.clone().grind(bits);
+        self.observe(w);
+        assert_eq!(self.sample_bits(bits), 0);
+        w
     }
 }
 
@@ -109,8 +116,8 @@ pub use p3_uni_stark::{StarkConfig, StarkGenericConfig};
 pub type Config = StarkConfig<bn254::Pcs<F>, bn254::Challenge<F>, Recording>;
 
 /// The Poseidon2-BN254 configuration of `bn254::config`, with the recording challenger.
-pub fn config(log_blowup: usize, queries: usize) -> (Config, Arc<Mutex<Vec<Op>>>) {
-    let base = bn254::config::<F>(log_blowup, queries);
+pub fn config(log_blowup: usize, queries: usize, query_pow: usize) -> (Config, Arc<Mutex<Vec<Op>>>) {
+    let base = bn254::config_pow::<F>(log_blowup, queries, query_pow);
     let rec = Recording::new();
     let log = rec.log.clone();
     (StarkConfig::new(base.pcs().clone(), rec), log)
@@ -133,7 +140,7 @@ fn all_degrees(st: &StateStatement, p: &Params) -> Vec<usize> {
 
 /// `poseidon2_bn254::prove_one` with the recording challenger.
 pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> BatchProof<Config> {
-    let (cfg, _) = config(p.log_blowup, p.queries);
+    let (cfg, _) = config(p.log_blowup, p.queries, p.query_pow);
     let (airs, traces, degs) = all_instance::<F>(st, traces);
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
@@ -145,7 +152,7 @@ pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -
 /// Verifies like `poseidon2_bn254::verify_one` (without the statement checks) and returns the
 /// Fiat-Shamir log of the verification.
 pub fn verify_one(st: &StateStatement, proof: &BatchProof<Config>, p: &Params) -> (bool, Vec<Op>) {
-    let (cfg, log) = config(p.log_blowup, p.queries);
+    let (cfg, log) = config(p.log_blowup, p.queries, p.query_pow);
     let airs = all_airs::<F>(st);
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     log.lock().unwrap().clear();
@@ -161,7 +168,7 @@ mod tests {
     #[test]
     fn recorded_verification_log() {
         let (st, traces) = crate::state::tests_case(1100, 8);
-        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3 };
+        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = prove_one(&st, &traces, &p);
         let (ok, ops) = verify_one(&st, &proof, &p);
         assert!(ok);

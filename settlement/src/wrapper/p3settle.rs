@@ -106,14 +106,14 @@ mod tests {
     #[test]
     fn plonky3_settlement_circuit_binds_roots_proof_and_header() {
         let (st, traces) = ss_rap_p3::state::tests_case(300, 7);
-        let p = Params { log_rows: 7, log_blowup: 1, queries: 8, budget: 3 };
+        let p = Params { log_rows: 7, log_blowup: 1, queries: 8, budget: 3, query_pow: 8 };
         let (proof, ops) = prove(&st, &traces, &p);
         let shape = P3SettleShape::new(&st, &p, &proof, &ops);
         let w = witness(&shape, &proof, &ops);
         let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [1; 32], batch_number: 7, chain_id: 31337 };
         let (ok, n) = sat(P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) });
         assert!(ok, "honest batch");
-        eprintln!("Plonky3 settlement circuit (300 tx, 2^7 rows, 8 queries): {n} constraints");
+        eprintln!("Plonky3 settlement circuit (300 tx, 2^7 rows, 8 queries, 8 bits of query grinding): {n} constraints");
         // a header claiming another new root
         let mut bad = h.clone();
         bad.new_state_root[0] ^= 1;
@@ -132,5 +132,9 @@ mod tests {
         let mut bw = w.clone();
         bw.inst[1].main_local[3][2] = (bw.inst[1].main_local[3][2] + 5) % 2013265921;
         assert!(!sat(P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&bw), header: Some(&h) }).0, "forged opening");
+        // a grinding witness that does not pass the proof-of-work check
+        let mut bw = w.clone();
+        bw.fri.query_pow_witness = (bw.fri.query_pow_witness + 1) % 2013265921;
+        assert!(!sat(P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&bw), header: Some(&h) }).0, "bad proof of work");
     }
 }

@@ -56,6 +56,16 @@ pub fn stark_dev_setup(shape: crate::wrapper::settle_circuit::SettleShape) -> (P
     Groth16::<Bn254>::circuit_specific_setup(c, &mut rng).expect("setup")
 }
 
+pub const P3_DEV_SETUP_SEED: [u8; 32] = *b"SS-RAP-v2-PLONKY3-WRAPPER-UNSAFE";
+
+/// Reproducible setup of the Plonky3 settlement circuit (`wrapper::p3settle`) for one shape.
+/// NOT SECURE (public seed): tests and CI only.
+pub fn p3_dev_setup(shape: &crate::wrapper::p3settle::P3SettleShape) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+    let mut rng = ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED);
+    let c = crate::wrapper::p3settle::P3SettleCircuit { shape, st: None, proof: None, header: None };
+    Groth16::<Bn254>::circuit_specific_setup(c, &mut rng).expect("setup")
+}
+
 pub fn prove(pk: &ProvingKey<Bn254>, public_input: Fr, seed: u64) -> Proof<Bn254> {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     Groth16::<Bn254>::prove(pk, SettlementCircuit { public_input: Some(public_input) }, &mut rng).expect("prove")

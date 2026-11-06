@@ -103,3 +103,56 @@ në vend të 5.
 Me Keccak, 1 provë, blowup 2 × 100: 0.16 s (kundrejt 0.23 s me 5 prova).
 Query-të më të pakta e ulin qarkun afërsisht në proporcion (100 → 25 = ~4×), por e rrisin kohën e
 provimit; zgjedhja përfundimtare bëhet pasi të matim qarkun.
+
+## P4b hapi 2: verifikuesi i provës Plonky3 brenda Groth16
+
+Qarku i settlement-it mbi Plonky3 (`settlement/src/wrapper/p3settle.rs`) ka të njëjtin input publik
+si kontrata, `x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId) mod r`,
+dhe provon që:
+
+- rrënjët e vjetra/të reja janë ato të një deklarate të mirëformuar (`StatementVar`, deklarata si dëshmi);
+- `v_umt_root = Poseidon(digest, main, permutation, quotient, commit-et e FRI)` i provës Plonky3;
+- prova Plonky3 me 5 korsi (`record::prove_one`, Merkle dhe transcript Poseidon2-BN254) verifikohet
+  në R1CS (`p3batch_var::verify_batch_var`): transcript-i (`challenger_var`), FRI/PCS (`p3fri_var`),
+  kufizimet AIR + LogUp në zeta nga listat simbolike të p3 (`p3air_eval`), shuma e terminaleve = 0.
+
+Pjesët, të testuara secila kundrejt provave reale të Plonky3, me teste negative:
+
+| Moduli | Çfarë bën |
+|---|---|
+| `poseidon2_var` | Poseidon2-BN254 (t = 3), sponge MultiField32, Merkle me lartësi të përziera |
+| `challenger_var` | `MultiField32Challenger`: observe/sample/sample_bits, ndarja kanonike në bazën p |
+| `p3fri_var` | `TwoAdicFriPcs`: hapjet e reduktuara, palosja arity 2, Merkle, proof-of-work i query-ve |
+| `p3air_eval` | kufizimet në zeta nga `get_symbolic_constraints` (bazë + ext), selektorët, kolonat periodike |
+| `p3batch_var` | verifikuesi i plotë `verify_batch` për 11 instancat (5 gjendje, bajtet, 5 publike) |
+| `p3settle` | deklarata + verifikuesi + `v_umt_root` + header keccak |
+
+**Lidhja e deklaratës me Fiat-Shamir (rregullim sigurie).** `p3-batch-stark` 0.9.0-rc.2 NUK i fut
+kolonat periodike (as `periodic_statement`) në transcript. Pa ndryshim, një provues mund të
+angazhonte një trace publik me tuple të sajuara, të mësonte zeta dhe vetëm pastaj të zgjidhte
+deklaratën që kalon kontrollin e vetëm në zeta. Tani AIR-i publik i korsisë 0 deklaron si vlera
+publike digest-in e deklaratës (9 limbs × 30 bit); Plonky3 i vëzhgon menjëherë pas commit-it main,
+para çdo sfide, dhe verifikuesi (natív dhe në qark) i rillogarit nga deklarata.
+
+**Kufizimet** (600 transferta, 5 korsi × 2^8 rreshta, blowup 2 × 20 query): 5.57M → 3.88M pas
+optimizimeve (hapjet e reduktuara grupohen sipas (lartësi, pikë): 1.71M → 0.32M; twiddle-t e
+palosjes rrjedhin nga njëri-tjetri në vend të fuqizimit për çdo raund: 0.25M → 0.12M; inverset e
+kolonave periodike ndahen mes korsive). Ndarja (`P3_STAGES=1`):
+
+| Pjesa | Kufizime |
+|---|---|
+| alokimi i dëshmive (vlerat e hapura, rreshtat e query-ve) | 1.14M |
+| transcript-i i PCS + shumat në z | 0.71M |
+| hapjet Merkle të input-eve | 0.60M |
+| hapjet e reduktuara | 0.32M |
+| Merkle i fazës commit | 0.26M |
+| palosja | 0.12M |
+| kufizimet në zeta | 0.72M |
+
+**Groth16 i vërtetë** (`cargo run --release -p ss_rap_settlement --example export_p3_fixture`,
+40 transferta, 5 × 2^5 rreshta, blowup 2 × 4 query + 8 bit grinding, 4 bërthama):
+2.40M kufizime, setup 49 s, prove 38 s, verify 2.7 ms, kujtesa maksimale ~8 GB. Shkruan
+`contracts/P3WrapperVerifier.sol` dhe `test/P3SettlementFixture.sol`; `test/P3Settlement.t.sol`
+e settle-on përmes `SSRapSettlementVerifierV2.verifyAndSettleBatchV2` dhe refuzon një rrënjë tjetër,
+një `v_umt_root` tjetër dhe pika të ndërruara. CI e rigjeneron dhe dështon nëse ndryshon.
+Çelësi vjen nga `groth16::p3_dev_setup` me farë publike: VETËM për zhvillim, prodhimi kërkon ceremoni.
