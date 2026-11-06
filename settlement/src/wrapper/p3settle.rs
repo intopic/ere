@@ -200,6 +200,7 @@ mod tests {
 
     #[test]
     fn plonky3_settlement_circuit_binds_roots_proof_and_header() {
+        let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(300, 7);
         let p = Params { log_rows: 7, log_blowup: 1, queries: 8, budget: 3, query_pow: 8 };
         let (proof, ops) = prove(&st, &traces, &p);

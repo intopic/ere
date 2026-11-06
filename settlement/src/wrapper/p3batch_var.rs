@@ -738,6 +738,7 @@ mod tests {
 
     #[test]
     fn verifies_the_five_lane_plonky3_proof_in_r1cs() {
+        let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = record::prove_one(&st, &traces, &p);

@@ -339,6 +339,7 @@ mod tests {
     /// with our interpreter and compares it with the quotient recomposed from the opened chunks.
     #[test]
     fn constraints_at_zeta_match_the_quotient() {
+        let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
         let proof = record::prove_one(&st, &traces, &p);

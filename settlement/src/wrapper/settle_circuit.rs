@@ -163,6 +163,7 @@ mod tests {
 
     #[test]
     fn settlement_circuit_binds_roots_proof_and_header() {
+        let _heavy = crate::heavy_test_lock();
         let (st, proof, shape) = small_case();
         let h = header(&st, &proof);
         let (ok, n) = sat(SettleCircuit { shape, st: Some(&st), proof: Some(&proof), header: Some(&h) });

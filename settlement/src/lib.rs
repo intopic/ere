@@ -12,3 +12,11 @@ pub mod pipeline;
 pub mod public_input;
 pub mod sequencer;
 pub mod wrapper;
+
+/// Tests that build a Plonky3 settlement circuit take several GB each: they hold this lock so
+/// that `cargo test` never runs two of them at once (CI runners have 16 GB).
+#[cfg(test)]
+pub(crate) fn heavy_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    HEAVY.lock().unwrap_or_else(|e| e.into_inner())
+}

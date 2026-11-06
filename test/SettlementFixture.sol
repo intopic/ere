@@ -5,16 +5,16 @@
 pragma solidity ^0.8.26;
 
 library SettlementFixture {
-    bytes32 internal constant OLD_ROOT = 0x2f5bc57216eb783ccca93ca598de6363a02fc94b7fc90450f3819c90ed01df1a;
-    bytes32 internal constant NEW_ROOT = 0x00e07e428b59e814b90e496de93b79239df22c018f9754398137e7cd6123cd23;
-    bytes32 internal constant VUMT_ROOT = 0x8e46a9ef019d48061f0fef0de0d2659ff0f6a8bfc8ae34c803bd5df81c3ae312;
-    bytes32 internal constant BLOB_HASH = 0x0181fd1a6cf29ef65ee9f7e28051c38490b3feb5a4735c6ef0ac93c36fee741c;
+    bytes32 internal constant OLD_ROOT = 0xcf3afdcb60f9f6f2a419a12c55f3fe37cb50967744368ceb8ffd5473cb341205;
+    bytes32 internal constant NEW_ROOT = 0x07609152513fc6695e13dd4cc33f6c2603025d52ee6d31d78fb4d63c43c24228;
+    bytes32 internal constant VUMT_ROOT = 0x67823d2f82e97539ee2559d7965aa4d41fe3c9493905233ea4041f87f724a001;
+    bytes32 internal constant BLOB_HASH = 0x018725e11320b2c83e9028af12056e2fb57b686d82b9312704aa6a7aa9dbf462;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
-    uint256 internal constant PUBLIC_INPUT = 0x0a51d09bd26cccd00aab4cff26eec06be6820a3756cf388bb24f7c7dd8046398;
+    uint256 internal constant PUBLIC_INPUT = 0x2eea73955996a8d5c1709209720f8c1cd632f48f1a648d09b7d32763785f478b;
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x123fe1bee2e93a652b1cecb6bd3fdf5f14dd2283a3829aff5a14e7437e21bc06), uint256(0x06c8ee9295d3916d1c7302c5fc1edec0c2fee8d37679f98513b91b2ae2a92d23)];
+        p = [uint256(0x03b0450f0478abac98c838fa26198b3cc6ebd0553d719581fbc266a1dd28c307), uint256(0x284566b716fbad4b2e0ab983d7c18545ba0dacc1fc8aa0f039ae3988df2053f3)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
@@ -22,6 +22,6 @@ library SettlementFixture {
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x0bece83f7c930233ba31325312873bf7eb9e286fae90a5d4a90a8e46613e621a), uint256(0x1082d30a3659d543c48a99f44671c205b07bdeb02018c06af1a6b644065e0068)];
+        p = [uint256(0x1c38f3b30e0dba97669cfb6fedfda4e767ebd68589290c2fbc1357c1c7bd75bf), uint256(0x27c6551d7466605e3004f4bcb3af4c17fc0abcc5e852e6b65c0ea417f8866f55)];
     }
 }

@@ -185,8 +185,8 @@ në fije të veçanta dhe pastaj bashkohen në një R1CS të vetme:
   variablat e tij me to (`export`); fëmija merr vlera të prindit me `import`. Lidhja është e njëjta
   kolonë në matricën e bashkuar, pra pa kufizim shtesë;
 - pjesët: statement-i (fëmijë, prindi merr digest-in, rrënjët, limbat dhe çdo vlerë që lexon një
-  tabelë publike), çdo instancë në zeta, peshat periodike, grupet e query-ve FRI (`P3_QUERY_GROUPS`,
-  default 4); prindi mban transkriptin, PCS-në deri te shumat dhe keccak-un e header-it;
+  tabelë publike), çdo instancë në zeta, peshat periodike, grupet e query-ve FRI (`QUERY_GROUPS = 4`,
+  konstante: grupimi ndryshon sistemin, pra e fikson çelësi); prindi mban transkriptin, PCS-në deri te shumat dhe keccak-un e header-it;
 - prindi finalizohet ndërsa fëmijët ende punojnë; bashkimi rindërton kolonat në vend;
 - Groth16: setup me `MatrixCircuit` (rishfaq matricat), prove me
   `create_proof_with_reduction_and_matrices`. Rezultati është deterministik (renditja sipas
