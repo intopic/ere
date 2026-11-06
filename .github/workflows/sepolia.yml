@@ -1,0 +1,25 @@
+name: Sepolia end-to-end
+# One real batch settled on Sepolia: Plonky3 proof -> Groth16 -> blob transaction.
+# Needs the secrets SEPOLIA_RPC_URL and SEPOLIA_PRIVATE_KEY (a TEST key with testnet ETH).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sepolia:
+    name: Settle one batch on Sepolia
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Settle the batch
+        env:
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          SEPOLIA_PRIVATE_KEY: ${{ secrets.SEPOLIA_PRIVATE_KEY }}
+        run: script/sepolia_e2e.sh | tee sepolia.txt
+      - name: Summary
+        if: always()
+        run: |
+          { echo '## Sepolia end-to-end'; echo '```'; cat sepolia.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

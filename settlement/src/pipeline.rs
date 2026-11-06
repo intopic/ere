@@ -18,8 +18,8 @@
 //!   first state STARK inside the SNARK; `Wrapper::P3` (wrapper/p3settle.rs) verifies the
 //!   5-lane Plonky3 batch-STARK inside the SNARK, the production path. Each key is for one
 //!   fixed batch shape.
-//! - The blob versioned hash is 0x01 || blake3(blob)[1..]. On a real network it is
-//!   0x01 || sha256(KZG commitment)[1..], computed by the node when the blob tx is built.
+//! - The blob versioned hash is the real EIP-4844 one: 0x01 || sha256(KZG commitment)[1..] of
+//!   the batch's blob (`blob.rs`), the value `blobhash(0)` returns to the contract.
 
 use crate::fees::{batch_economics, BatchEconomics, CostModel, FeeSchedule};
 use crate::groth16;
@@ -72,10 +72,10 @@ pub struct SettlementPackage {
     pub economics: BatchEconomics,
 }
 
-pub fn blob_versioned_hash(blob: &[u8]) -> [u8; 32] {
-    let mut h = *blake3::hash(blob).as_bytes();
-    h[0] = 0x01;
-    h
+/// The versioned hash of the blob that carries `data` (the batch's `blob_data`).
+pub fn blob_versioned_hash(data: &[u8]) -> Result<[u8; 32], PipelineError> {
+    let blob = crate::blob::to_blob(data).ok_or(PipelineError::BlobTooLarge)?;
+    Ok(crate::blob::versioned_hash(&blob))
 }
 
 /// Binds the public statement and every STARK commitment (trace, aux, quotient, all FRI
@@ -123,6 +123,8 @@ pub enum PipelineError {
     Groth16Rejected,
     /// The batch does not have the shape the settlement circuit's key was made for.
     ShapeMismatch,
+    /// The batch's transactions do not fit in one blob.
+    BlobTooLarge,
 }
 
 pub fn settle(
@@ -178,7 +180,7 @@ pub fn settle_with(
         old_state_root: batch.old_state_root,
         new_state_root: batch.new_state_root,
         v_umt_root: v_umt_root(&st, &stark_proof),
-        blob_versioned_hash: blob_versioned_hash(&batch.blob_data()),
+        blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
         batch_number: batch.batch_number,
         chain_id: cfg.chain_id,
     };
@@ -247,7 +249,7 @@ fn settle_p3(
         old_state_root: batch.old_state_root,
         new_state_root: batch.new_state_root,
         v_umt_root: p3settle::v_umt_root(&st, &w),
-        blob_versioned_hash: blob_versioned_hash(&batch.blob_data()),
+        blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
         batch_number: batch.batch_number,
         chain_id: cfg.chain_id,
     };

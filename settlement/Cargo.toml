@@ -35,3 +35,5 @@ num-bigint-05 = { package = "num-bigint", version = "0.5" }
 p3-air = "=0.9.0-rc.2"
 p3-batch-stark = "=0.9.0-rc.2"
 p3-lookup = "=0.9.0-rc.2"
+c-kzg = "2"
+sha2 = "0.10"
