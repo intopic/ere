@@ -213,15 +213,18 @@ pub fn eval_columns(cols: &[u32], pl: &PColumns, ch: usize) -> [u32; CONSTRAINTS
     let mut out = [0u32; CONSTRAINTS_PER_CHANNEL];
     for k in 0..PRODUCT_COLUMNS {
         // sum a_i*b_l - q_i*P_l with lazy reduction: each term < m^2, keep the sum below 2^64.
+        // (m^2 * 7 does not fit in u64 for 31-bit moduli such as BabyBear: reduce once the next
+        // term could overflow.)
+        let limit = u64::MAX - m2;
         let mut pos = 0u64;
         let mut neg = 0u64;
         for i in k.saturating_sub(BYTES - 1)..=k.min(BYTES - 1) {
             pos += a[i] as u64 * b[k - i] as u64;
             neg += q[i] as u64 * pl[k - i] as u64;
-            if pos >= m2 * 7 {
+            if pos >= limit {
                 pos %= m as u64;
             }
-            if neg >= m2 * 7 {
+            if neg >= limit {
                 neg %= m as u64;
             }
         }
