@@ -156,3 +156,19 @@ kolonave periodike ndahen mes korsive). Ndarja (`P3_STAGES=1`):
 e settle-on përmes `SSRapSettlementVerifierV2.verifyAndSettleBatchV2` dhe refuzon një rrënjë tjetër,
 një `v_umt_root` tjetër dhe pika të ndërruara. CI e rigjeneron dhe dështon nëse ndryshon.
 Çelësi vjen nga `groth16::p3_dev_setup` me farë publike: VETËM për zhvillim, prodhimi kërkon ceremoni.
+
+Në zinxhir (Foundry, CI): `verifyAndSettleBatchV2` me këtë verifikues kushton 269k gas (verifyProof
+192k), njësoj si qarqet e tjera, sepse Groth16 ka gjithmonë 1 input publik.
+
+**Format e prodhimit** (`P3_COUNT_ONLY=1 ... export_p3_fixture <tx> 0 <log_blowup> <queries> 16`,
+siguri e konjekturuar 100 bit = log_blowup × queries + 16 bit grinding):
+
+| Transferta | FRI | Plonky3 prove | Kufizime |
+|---|---|---|---|
+| 1 000 | blowup 8 × 28 + 16 bit | 0.78 s | 5.55M |
+| 1 000 | blowup 2 × 84 + 16 bit | 0.43 s | 11.17M |
+| 20 000 | blowup 8 × 28 + 16 bit | 10.6 s | 15.03M |
+
+Zgjedhja: blowup 8 × 28 + 16 bit grinding (qarku 2× më i vogël se blowup 2). Me ~2.4M kufizime
+Groth16 merr ~37 s dhe ~8 GB në 4 bërthama CPU; 15M kufizime në CPU janë rreth 4–5 min dhe
+~40–50 GB RAM, prandaj forma 20k shkon me GPU (RTX 4090, hapi 5) ose në një makinë me më shumë RAM.

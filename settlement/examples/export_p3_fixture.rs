@@ -29,6 +29,8 @@ fn main() {
     let a: Vec<usize> = std::env::args().skip(1).map(|s| s.parse().unwrap()).collect();
     let (n_tx, log_rows, log_blowup, queries, query_pow) = (*a.first().unwrap_or(&40), *a.get(1).unwrap_or(&5), *a.get(2).unwrap_or(&1), *a.get(3).unwrap_or(&4), *a.get(4).unwrap_or(&8));
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    // log_rows 0: the smallest trace that holds the batch
+    let log_rows = if log_rows == 0 { ss_rap_v2::state::params(n_tx, 2, 50).log_rows as usize } else { log_rows };
     let (st, traces) = ss_rap_p3::state::tests_case(n_tx as u32, log_rows as u32);
     let p = Params { log_rows, log_blowup, queries, budget: 3, query_pow };
 
@@ -40,16 +42,24 @@ fn main() {
     let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [0x01; 32], batch_number: 1, chain_id: 31337 };
     let circ = || P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) };
 
+    let count_only = std::env::var("P3_COUNT_ONLY").is_ok();
     let cs = ConstraintSystem::<Fr>::new_ref();
+    if count_only {
+        // count without storing the matrices (large shapes)
+        cs.set_mode(ark_relations::r1cs::SynthesisMode::Prove { construct_matrices: false });
+    }
+    let t0 = Instant::now();
     circ().generate_constraints(cs.clone()).unwrap();
+    let t_synth = t0.elapsed();
     let n = cs.num_constraints();
-    let ok = cs.is_satisfied().unwrap();
+    let ok = count_only || cs.is_satisfied().unwrap();
     drop(cs);
     println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);
     println!("  Plonky3 prove (Poseidon2-BN254) : {:.0} ms", t_stark.as_secs_f64() * 1e3);
-    println!("  constraints                     : {n} (satisfied: {ok})");
+    println!("  constraints                     : {n} (satisfied: {})", if count_only { "not checked".to_string() } else { ok.to_string() });
+    println!("  witness generation              : {:.1} s", t_synth.as_secs_f64());
     assert!(ok);
-    if std::env::var("P3_COUNT_ONLY").is_ok() {
+    if count_only {
         return;
     }
 
