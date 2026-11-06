@@ -16,7 +16,9 @@ me=$(cast wallet address --private-key "$SEPOLIA_PRIVATE_KEY")
 cast --version
 echo "chain $chain, sender $me, balance $(cast balance "$me" --rpc-url "$SEPOLIA_RPC_URL" --ether) ETH"
 
-cargo run --release --locked -p ss_rap_settlement --example sepolia_e2e -- "$chain" "$out"
+# batch size and count: E2E_TXS, E2E_ACCOUNTS, E2E_LOG_ROWS, E2E_BATCHES (default 2 batches of 20 tx)
+cargo run --release --locked -p ss_rap_settlement --example sepolia_e2e -- "$chain" "$out" \
+  "${E2E_TXS:-20}" "${E2E_ACCOUNTS:-8}" "${E2E_LOG_ROWS:-5}" "${E2E_BATCHES:-2}"
 cp "$out/E2EVerifier.sol" contracts/E2EVerifier.sol
 # shellcheck disable=SC1090
 source "$out/e2e.env"
@@ -78,17 +80,22 @@ settle_batch() {  # <env file> <blob file>; sets tx
 }
 gas_of() { cast receipt "$1" gasUsed --rpc-url "$SEPOLIA_RPC_URL" | awk '{print $1}'; }
 
-settle_batch "$out/e2e.env" "$out/blob.bin"
-tx1=$tx
-settle_batch "$out/e2e2.env" "$out/blob2.bin"
-tx2=$tx
+batches=${E2E_BATCHES:-2}
+txs_all=()
+for i in $(seq 1 "$batches"); do
+  sfx=$([ "$i" = 1 ] || echo "$i")
+  settle_batch "$out/e2e$sfx.env" "$out/blob$sfx.bin"
+  txs_all+=("$tx")
+done
+tx1=${txs_all[0]}
+tx2=${txs_all[$((batches - 1))]}
 
-# replaying batch 2 must fail: the contract only takes the next batch on top of its root
+# replaying the last batch must fail: the contract only takes the next batch on top of its root
 if replay=$(cast estimate "$settlement" "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
   "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C" --from "$me" --rpc-url "$SEPOLIA_RPC_URL" 2>&1); then
-  echo "REPLAY OF BATCH 2 WAS ACCEPTED"; exit 1
+  echo "REPLAY OF THE LAST BATCH WAS ACCEPTED"; exit 1
 fi
-echo "replay of batch 2 rejected (as it must be): $(grep -o '0x[0-9a-f]\{8\}\|InvalidBatchSequence\|revert[^,]*' <<<"$replay" | head -1)"
+echo "replay of the last batch rejected (as it must be): $(grep -o '0x[0-9a-f]\{8\}\|InvalidBatchSequence\|revert[^,]*' <<<"$replay" | head -1)"
 
 # what the same transactions would cost on mainnet, at the fees of the last ~1024 mainnet blocks
 deploy_verifier_gas=$(gas_of "$(jq -r .transactionHash <<<"$dv")")
@@ -96,7 +103,19 @@ deploy_settlement_gas=$(gas_of "$(jq -r .transactionHash <<<"$ds")")
 settle_gas=$(gas_of "$tx1")
 settle2_gas=$(gas_of "$tx2")
 blob_gas=$(cast to-dec "$(cast receipt "$tx2" --rpc-url "$SEPOLIA_RPC_URL" --json | jq -r .blobGasUsed)")
-echo "gas: deploy verifier $deploy_verifier_gas, deploy settlement $deploy_settlement_gas, batch 1 $settle_gas, batch 2 $settle2_gas, blob gas $blob_gas per batch"
+echo "gas: deploy verifier $deploy_verifier_gas, deploy settlement $deploy_settlement_gas, batch 1 $settle_gas, later batches $settle2_gas, blob gas $blob_gas per batch"
+
+# the bill of all batches together, as Etherscan shows it (gas used x effective gas price + blob fee)
+total_gas=0; total_wei=0
+for t in "${txs_all[@]}"; do
+  r=$(cast receipt "$t" --rpc-url "$SEPOLIA_RPC_URL" --json)
+  g=$(cast to-dec "$(jq -r .gasUsed <<<"$r")"); p=$(cast to-dec "$(jq -r .effectiveGasPrice <<<"$r")")
+  bg=$(cast to-dec "$(jq -r '.blobGasUsed // "0x0"' <<<"$r")"); bp=$(cast to-dec "$(jq -r '.blobGasPrice // "0x0"' <<<"$r")")
+  total_gas=$((total_gas + g)); total_wei=$(python3 -c "print($total_wei + $g * $p + $bg * $bp)")
+done
+n_tx=$((TXS * batches))
+echo "BILL: $batches batches, $n_tx L2 transactions, $total_gas gas, $(cast from-wei "$total_wei") Sepolia ETH in total"
+echo "BILL per L2 tx: $((total_gas / n_tx)) gas, $(python3 -c "print(f'{$total_wei / $n_tx / 1e18:.12f}')") ETH"
 echo "code size: verifier $(( ($(cast code "$verifier" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes, settlement $(( ($(cast code "$settlement" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes"
 python3 script/mainnet_cost.py "$deploy_verifier_gas" "$deploy_settlement_gas" "$settle_gas" "$blob_gas" "$TXS" "$settle2_gas" \
   || echo "(mainnet fee estimate unavailable)"

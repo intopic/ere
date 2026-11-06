@@ -1,11 +1,11 @@
-//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <out_dir> [txs] [accounts] [log_rows]
+//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <out_dir> [txs] [accounts] [log_rows] [batches]
 //!
 //! One real batch for a public testnet: signed transfers -> sequencer -> 5-lane Plonky3
 //! batch-STARK -> Plonky3 settlement circuit (Groth16) with the chain's id and the real KZG
 //! versioned hash of the batch's blob. Writes to <out_dir>:
 //!   E2EVerifier.sol -- Groth16 verifier of this shape (DEV key, public seed: testnet only)
-//!   blob.bin, blob2.bin -- the 131072-byte EIP-4844 blobs of batches 1 and 2
-//!   e2e.env, e2e2.env   -- roots, batch number, blob hash and the proof, for the L1 transaction
+//!   blob.bin, blob2.bin, ... -- the 131072-byte EIP-4844 blob of each batch (1, 2, ...)
+//!   e2e.env, e2e2.env, ...   -- roots, batch number, blob hash and the proof, for the L1 transaction
 //! Small shape and few FRI queries (fast, NOT the production parameters).
 
 use ss_rap_settlement::blob;
@@ -28,17 +28,26 @@ fn main() {
     let txs: u64 = args.next().map(|s| s.parse().expect("txs")).unwrap_or(20);
     let accounts: u64 = args.next().map(|s| s.parse().expect("accounts")).unwrap_or(8);
     let log_rows: usize = args.next().map(|s| s.parse().expect("log_rows")).unwrap_or(5);
+    let num_batches: usize = args.next().map(|s| s.parse().expect("batches")).unwrap_or(2);
 
     let addr = |i: u64| address_of(dev_key(i).verifying_key());
     let genesis: Vec<([u8; 20], u64)> = (0..accounts).map(|i| (addr(i), 1_000_000)).collect();
     let mut seq = Sequencer::new(&genesis, txs as usize, FeeSchedule::default());
     seq.chain_id = chain_id;
-    for k in 0..txs {
-        let from = k % accounts;
-        let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-        seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, (k / accounts) as u32, kind, chain_id)).expect("valid tx");
-    }
-    let batch = seq.seal();
+    // every batch: the same senders and kinds in the same order (next nonces), so every batch
+    // has the same shape and is proved with the same key
+    let mut nonces = vec![0u32; accounts as usize];
+    let mut fill = |seq: &mut Sequencer| {
+        for k in 0..txs {
+            let from = k % accounts;
+            let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
+            let n = &mut nonces[from as usize];
+            seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, *n, kind, chain_id)).expect("valid tx");
+            *n += 1;
+        }
+        seq.seal()
+    };
+    let batch = fill(&mut seq);
 
     let t0 = Instant::now();
     let p = P3Params { log_rows, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
@@ -52,16 +61,10 @@ fn main() {
     .unwrap();
     println!("SS-RAP v2 testnet batches: {} signed transfers each, chain {chain_id}", batch.txs.len());
     println!("  setup (shape matrices + DEV Groth16 key): {:.1} s", t_setup.as_secs_f64());
-    // batch 2: the same senders and kinds again (next nonces), so the same shape and the same key
     let mut batches = vec![batch];
-    for k in 0..txs {
-        let from = k % accounts;
-        let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-        let sent_in_batch1 = (txs + accounts - 1 - from) / accounts; // txs of `from` in batch 1
-        let nonce = (sent_in_batch1 + k / accounts) as u32;
-        seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, nonce, kind, chain_id)).expect("valid tx");
+    while batches.len() < num_batches {
+        batches.push(fill(&mut seq));
     }
-    batches.push(seq.seal());
     for (i, batch) in batches.iter().enumerate() {
         let suffix = if i == 0 { String::new() } else { format!("{}", i + 1) };
         let pkg = settle_with(batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default()).expect("pipeline");
