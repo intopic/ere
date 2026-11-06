@@ -387,6 +387,108 @@ pub fn verify_pcs(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// witness generation from a Plonky3 proof
+// ---------------------------------------------------------------------------------------------
+
+use p3_baby_bear::BabyBear;
+use p3_field::extension::BinomialExtensionField;
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField, PrimeField32, TwoAdicField};
+use p3_matrix::Dimensions;
+
+type EFp = BinomialExtensionField<BabyBear, 4>;
+pub type PcsProof = <ss_rap_p3::bn254::Pcs<BabyBear> as p3_commit::Pcs<EFp, ss_rap_p3::record::Recording>>::Proof;
+
+pub fn bn_to_fr(x: p3_bn254::Bn254) -> Fr {
+    Fr::from(BigUint::from_bytes_le(&x.as_canonical_biguint().to_bytes_le()))
+}
+
+pub fn ef_u32(x: EFp) -> [u32; 4] {
+    let c: &[BabyBear] = x.as_basis_coefficients_slice();
+    [0, 1, 2, 3].map(|i| c[i].as_canonical_u32())
+}
+
+/// Expands Plonky3's pruned Merkle proofs per query and recomputes the verifier's folded values
+/// (the commit-phase leaves contain them), with the challenges the transcript gives.
+pub fn fri_witness(shape: &FriShape, proof: &PcsProof, indices: &[usize], alpha: EFp, betas: &[EFp], pts: &[Vec<Vec<EFp>>], opened: &[Vec<Vec<Vec<EFp>>>]) -> FriWitness {
+    let log_max = shape.log_max();
+    let rounds = shape.rounds();
+    let queries = shape.queries;
+    let mmcs = ss_rap_p3::bn254::config_mmcs::<BabyBear>();
+    let mut input_rows: Vec<Vec<Vec<Vec<u32>>>> = vec![vec![]; queries];
+    let mut input_paths: Vec<Vec<Vec<Fr>>> = vec![vec![]; queries];
+    for (b, bo) in proof.input_openings.iter().enumerate() {
+        let mats = &shape.batches[b];
+        let hb = mats.iter().map(|m| m.log_size).max().unwrap() + shape.log_blowup;
+        let dims: Vec<Dimensions> = mats.iter().map(|m| Dimensions { width: m.width, height: 1 << (m.log_size + shape.log_blowup) }).collect();
+        let red: Vec<usize> = indices.iter().map(|i| i >> (log_max - hb)).collect();
+        let paths = mmcs.restore_and_recompute_paths(&dims, &red, &bo.opened_values, &bo.opening_proof).unwrap();
+        for q in 0..queries {
+            input_rows[q].push(bo.opened_values[q].iter().map(|r| r.iter().map(|v| v.as_canonical_u32()).collect()).collect());
+            input_paths[q].push(paths[q].siblings.iter().map(|d| bn_to_fr(d[0])).collect());
+        }
+    }
+    let siblings: Vec<Vec<[u32; 4]>> = (0..queries).map(|q| proof.commit_phase_openings.iter().map(|st| ef_u32(st.sibling_values[q][0])).collect()).collect();
+    let e = |s: &[u32; 4]| EFp::from_basis_coefficients_slice(&s.map(BabyBear::from_u32)).unwrap();
+    let mut folded_rows: Vec<Vec<Vec<Vec<BabyBear>>>> = vec![vec![]; rounds];
+    for (q, &index) in indices.iter().enumerate() {
+        let mut ro = std::collections::BTreeMap::<usize, EFp>::new();
+        let mut offs = std::collections::BTreeMap::<usize, usize>::new();
+        for (b, mats) in shape.batches.iter().enumerate() {
+            for (m, ms) in mats.iter().enumerate() {
+                let lh = ms.log_size + shape.log_blowup;
+                let rev = p3_util::reverse_bits_len(index >> (log_max - lh), lh);
+                let x = BabyBear::GENERATOR * BabyBear::two_adic_generator(lh).exp_u64(rev as u64);
+                for i in 0..ms.num_points {
+                    let off = offs.entry(lh).or_default();
+                    let start = *off;
+                    *off += ms.width;
+                    let mut acc = EFp::ZERO;
+                    let mut ap = alpha.exp_u64(start as u64);
+                    for k in 0..ms.width {
+                        acc += ap * (opened[b][m][i][k] - EFp::from(BabyBear::from_u32(input_rows[q][b][m][k])));
+                        ap *= alpha;
+                    }
+                    *ro.entry(lh).or_insert(EFp::ZERO) += acc / (pts[b][m][i] - EFp::from(x));
+                }
+            }
+        }
+        let mut folded = ro.remove(&log_max).unwrap();
+        let mut idx = index;
+        for r in 0..rounds {
+            let l = log_max - r;
+            let sib = e(&siblings[q][r]);
+            let (lo, hi) = if idx & 1 == 1 { (sib, folded) } else { (folded, sib) };
+            folded_rows[r].push(vec![[lo, hi].iter().flat_map(|v| v.as_basis_coefficients_slice().to_vec()).collect()]);
+            idx >>= 1;
+            let s = BabyBear::two_adic_generator(l).exp_u64(p3_util::reverse_bits_len(idx, l - 1) as u64);
+            folded = (lo + hi).halve() + (lo - hi) * betas[r] * (s.double()).inverse();
+            if let Some(o) = ro.remove(&(l - 1)) {
+                folded += betas[r] * betas[r] * o;
+            }
+        }
+        assert_eq!(folded, proof.final_poly[0], "native fold");
+    }
+    let mut round_paths = vec![vec![]; queries];
+    for (r, step) in proof.commit_phase_openings.iter().enumerate() {
+        let lf = log_max - r - 1;
+        let idx: Vec<usize> = indices.iter().map(|i| i >> (r + 1)).collect();
+        let dims = [Dimensions { width: 8, height: 1 << lf }];
+        let paths = mmcs.restore_and_recompute_paths(&dims, &idx, &folded_rows[r], &step.opening_proof).unwrap();
+        for q in 0..queries {
+            round_paths[q].push(paths[q].siblings.iter().map(|d| bn_to_fr(d[0])).collect());
+        }
+    }
+    FriWitness {
+        commit_phase_commits: proof.commit_phase_commits.iter().map(|c| bn_to_fr(c[0][0])).collect(),
+        final_poly: ef_u32(proof.final_poly[0]),
+        input_rows,
+        input_paths,
+        siblings,
+        round_paths,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,9 +496,7 @@ mod tests {
     use p3_baby_bear::BabyBear;
     use p3_commit::Pcs;
     use p3_field::extension::BinomialExtensionField;
-    use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField, PrimeField32, TwoAdicField};
     use p3_matrix::dense::RowMajorMatrix;
-    use p3_matrix::Dimensions;
     use p3_uni_stark::StarkGenericConfig;
     use ss_rap_p3::record::{self, Op};
 
@@ -467,27 +567,15 @@ mod tests {
         // shape
         let batches: Vec<Vec<MatShape>> = specs.iter().zip(&pts).map(|(b, p)| b.iter().zip(p).map(|(&(lh, w), pp)| MatShape { log_size: lh, width: w, num_points: pp.len() }).collect()).collect();
         let n_claims: usize = batches.iter().flatten().map(|m| m.width * m.num_points).sum();
-        let log_max = 5 + log_blowup;
         let (pcs_seed, fri_seed) = seeds(&ops, n_claims);
         let shape = FriShape { batches, log_blowup, queries, pcs_seed, fri_seed };
 
-        // witness: expand the pruned Merkle proofs per query
         let indices: Vec<usize> = ops.iter().filter_map(|o| if let Op::SampleBits(_, v) = o { Some(*v) } else { None }).collect();
-        let mmcs = ss_rap_p3::bn254::config_mmcs::<BabyBear>();
-        let mut input_rows = vec![vec![]; queries];
-        let mut input_paths = vec![vec![]; queries];
-        for (b, bo) in proof.input_openings.iter().enumerate() {
-            let hb = specs[b].iter().map(|s| s.0).max().unwrap() + log_blowup;
-            let dims: Vec<Dimensions> = specs[b].iter().map(|&(lh, w)| Dimensions { width: w, height: 1 << (lh + log_blowup) }).collect();
-            let red: Vec<usize> = indices.iter().map(|i| i >> (log_max - hb)).collect();
-            let paths = mmcs.restore_and_recompute_paths(&dims, &red, &bo.opened_values, &bo.opening_proof).unwrap();
-            for q in 0..queries {
-                input_rows[q].push(bo.opened_values[q].iter().map(|r| r.iter().map(|v| v.as_canonical_u32()).collect()).collect());
-                input_paths[q].push(paths[q].siblings.iter().map(|d| to_fr(d[0])).collect());
-            }
-        }
-        let siblings: Vec<Vec<[u32; 4]>> = (0..queries).map(|q| proof.commit_phase_openings.iter().map(|st| ef(st.sibling_values[q][0])).collect()).collect();
-        let w = native_fri_witness(&shape, &proof, &indices, &input_rows, &input_paths, &siblings, &pts, &opened, &ops);
+        let samples: Vec<u32> = ops.iter().filter_map(|o| if let Op::Sample(v) = o { Some(*v) } else { None }).collect();
+        let e = |s: &[u32]| EF::from_basis_coefficients_slice(&s.iter().map(|&v| BabyBear::from_u32(v)).collect::<Vec<_>>()).unwrap();
+        let alpha = e(&samples[0..4]);
+        let betas: Vec<EF> = (0..shape.rounds()).map(|r| e(&samples[4 + 4 * r..8 + 4 * r])).collect();
+        let w = fri_witness(&shape, &proof, &indices, alpha, &betas, &pts, &opened);
         let run = |w: &FriWitness, opened: &Vec<Vec<Vec<Vec<EF>>>>| {
             let cs = ConstraintSystem::<Fr>::new_ref();
             let mut ch = ChallengerVar::new(cs.clone());
@@ -518,86 +606,5 @@ mod tests {
         let mut bw = w.clone();
         bw.input_rows[1][1][0][2] ^= 1;
         assert!(!run(&bw, &opened).0, "wrong input row");
-    }
-
-    /// The commit-phase Merkle paths need the opened pairs, which contain the verifier's own
-    /// folded values: fold natively (same formulas) to get them, then expand the pruned proofs.
-    #[allow(clippy::too_many_arguments)]
-    fn native_fri_witness(
-        shape: &FriShape,
-        proof: &<ss_rap_p3::bn254::Pcs<BabyBear> as Pcs<EF, record::Recording>>::Proof,
-        indices: &[usize],
-        input_rows: &[Vec<Vec<Vec<u32>>>],
-        input_paths: &[Vec<Vec<Fr>>],
-        siblings: &[Vec<[u32; 4]>],
-        pts: &[Vec<Vec<EF>>],
-        opened: &[Vec<Vec<Vec<EF>>>],
-        ops: &[Op],
-    ) -> FriWitness {
-        let log_max = shape.log_max();
-        let rounds = shape.rounds();
-        let samples: Vec<u32> = ops.iter().filter_map(|o| if let Op::Sample(v) = o { Some(*v) } else { None }).collect();
-        let e = |s: &[u32]| EF::from_basis_coefficients_slice(&s.iter().map(|&v| BabyBear::from_u32(v)).collect::<Vec<_>>()).unwrap();
-        let alpha = e(&samples[0..4]);
-        let betas: Vec<EF> = (0..rounds).map(|r| e(&samples[4 + 4 * r..8 + 4 * r])).collect();
-        let mut folded_rows: Vec<Vec<Vec<Vec<BabyBear>>>> = vec![vec![]; rounds]; // [round][query] -> row
-        for (q, &index) in indices.iter().enumerate() {
-            // reduced openings, as Plonky3
-            let mut ro = std::collections::BTreeMap::<usize, EF>::new();
-            let mut offs = std::collections::BTreeMap::<usize, usize>::new();
-            for (b, mats) in shape.batches.iter().enumerate() {
-                for (m, ms) in mats.iter().enumerate() {
-                    let lh = ms.log_size + shape.log_blowup;
-                    let rev = p3_util::reverse_bits_len(index >> (log_max - lh), lh);
-                    let x = BabyBear::GENERATOR * BabyBear::two_adic_generator(lh).exp_u64(rev as u64);
-                    for i in 0..ms.num_points {
-                        let off = offs.entry(lh).or_default();
-                        let start = *off;
-                        *off += ms.width;
-                        let mut acc = EF::ZERO;
-                        let mut ap = alpha.exp_u64(start as u64);
-                        for k in 0..ms.width {
-                            acc += ap * (opened[b][m][i][k] - EF::from(BabyBear::from_u32(input_rows[q][b][m][k])));
-                            ap *= alpha;
-                        }
-                        *ro.entry(lh).or_insert(EF::ZERO) += acc / (pts[b][m][i] - EF::from(x));
-                    }
-                }
-            }
-            let mut folded = ro.remove(&log_max).unwrap();
-            let mut idx = index;
-            for r in 0..rounds {
-                let l = log_max - r;
-                let sib = e(&siblings[q][r]);
-                let (lo, hi) = if idx & 1 == 1 { (sib, folded) } else { (folded, sib) };
-                folded_rows[r].push(vec![[lo, hi].iter().flat_map(|v| v.as_basis_coefficients_slice().to_vec()).collect()]);
-                idx >>= 1;
-                let s = BabyBear::two_adic_generator(l).exp_u64(p3_util::reverse_bits_len(idx, l - 1) as u64);
-                folded = (lo + hi).halve() + (lo - hi) * betas[r] * (s.double()).inverse();
-                if let Some(o) = ro.remove(&(l - 1)) {
-                    folded += betas[r] * betas[r] * o;
-                }
-            }
-            assert_eq!(folded, proof.final_poly[0]);
-        }
-        let mmcs = ss_rap_p3::bn254::config_mmcs::<BabyBear>();
-        let mut round_paths = vec![vec![]; shape.queries];
-        for (r, step) in proof.commit_phase_openings.iter().enumerate() {
-            let lf = log_max - r - 1;
-            let idx: Vec<usize> = indices.iter().map(|i| i >> (r + 1)).collect();
-            let dims = [Dimensions { width: 8, height: 1 << lf }];
-            let paths = mmcs.restore_and_recompute_paths(&dims, &idx, &folded_rows[r], &step.opening_proof).unwrap();
-            for q in 0..shape.queries {
-                round_paths[q].push(paths[q].siblings.iter().map(|d| to_fr(d[0])).collect());
-            }
-        }
-        FriWitness {
-            commit_phase_commits: proof.commit_phase_commits.iter().map(|c| to_fr(c[0][0])).collect(),
-            final_poly: ef(proof.final_poly[0]),
-            input_rows: input_rows.to_vec(),
-            input_paths: input_paths.to_vec(),
-            siblings: siblings.to_vec(),
-            round_paths,
-        }
     }
 }
