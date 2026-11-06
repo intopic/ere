@@ -61,8 +61,14 @@ pub const P3_DEV_SETUP_SEED: [u8; 32] = *b"SS-RAP-v2-PLONKY3-WRAPPER-UNSAFE";
 /// Reproducible setup of the Plonky3 settlement circuit (`wrapper::p3settle`) for one shape.
 /// NOT SECURE (public seed): tests and CI only.
 pub fn p3_dev_setup(shape: &crate::wrapper::p3settle::P3SettleShape) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+    p3_dev_setup_with_matrices(shape).0
+}
+
+/// `p3_dev_setup` and the shape's matrices (kept by the prover: per batch only the witness is
+/// computed).
+pub fn p3_dev_setup_with_matrices(shape: &crate::wrapper::p3settle::P3SettleShape) -> ((ProvingKey<Bn254>, VerifyingKey<Bn254>), ark_relations::r1cs::ConstraintMatrices<Fr>) {
     let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, true).expect("synthesis");
-    p3_setup_from_matrices(&m.matrices, &mut ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED))
+    (p3_setup_from_matrices(&m.matrices, &mut ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED)), m.matrices)
 }
 
 /// Groth16 setup of a merged R1CS (`wrapper::par::synthesize`).
@@ -72,11 +78,16 @@ pub fn p3_setup_from_matrices<R: ark_std::rand::RngCore + ark_std::rand::CryptoR
 
 /// Groth16 proof of a merged, satisfied R1CS with its full assignment.
 pub fn p3_prove_merged(pk: &ProvingKey<Bn254>, m: &crate::wrapper::par::Merged, seed: u64) -> Proof<Bn254> {
+    p3_prove_with(pk, &m.matrices, &m.assignment, seed)
+}
+
+/// Groth16 proof from the shape's matrices (computed once) and a batch's full assignment
+/// (`wrapper::p3settle::witness_parallel`).
+pub fn p3_prove_with(pk: &ProvingKey<Bn254>, mx: &ark_relations::r1cs::ConstraintMatrices<Fr>, assignment: &[Fr], seed: u64) -> Proof<Bn254> {
     use ark_std::UniformRand;
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let (r, s) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
-    let mx = &m.matrices;
-    Groth16::<Bn254>::create_proof_with_reduction_and_matrices(pk, r, s, mx, mx.num_instance_variables, mx.num_constraints, &m.assignment).expect("prove")
+    Groth16::<Bn254>::create_proof_with_reduction_and_matrices(pk, r, s, mx, mx.num_instance_variables, mx.num_constraints, assignment).expect("prove")
 }
 
 pub fn prove(pk: &ProvingKey<Bn254>, public_input: Fr, seed: u64) -> Proof<Bn254> {

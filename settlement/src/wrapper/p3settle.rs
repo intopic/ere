@@ -89,6 +89,12 @@ pub fn synthesize_parallel(shape: &P3SettleShape, st: Option<&StateStatement>, p
     par::synthesize(setup, |cs, p| synth(shape, st, proof, header, cs, p))
 }
 
+/// The full assignment only, in the column order of `synthesize_parallel(.., setup = true)`'s
+/// matrices: per batch, the matrices of the fixed shape are reused and only this is computed.
+pub fn witness_parallel(shape: &P3SettleShape, st: &StateStatement, proof: &BatchWitness, header: &BatchHeader) -> R<Vec<Fr>> {
+    par::synthesize_witness(|cs, p| synth(shape, Some(st), Some(proof), Some(header), cs, p))
+}
+
 /// The statement's values the rest of the circuit reads.
 struct StmtOut {
     digest: FpVar<Fr>,
@@ -236,8 +242,14 @@ mod tests {
         assert_eq!(setup.matrices.num_constraints, np);
         assert_eq!(setup.matrices.num_witness_variables, m.matrices.num_witness_variables);
         assert_eq!(setup.matrices.a, m.matrices.a, "setup and proving matrices");
+        // the witness alone (matrices of the shape reused) is the same assignment
+        let z = witness_parallel(&shape, &st, &w, &h).unwrap();
+        assert_eq!(z, m.assignment, "witness-only synthesis");
+        assert!(Merged { matrices: setup.matrices.clone(), assignment: z }.is_satisfied());
         let mut bw = w.clone();
         bw.inst[1].main_local[3][2] = (bw.inst[1].main_local[3][2] + 5) % 2013265921;
+        let z = witness_parallel(&shape, &st, &bw, &h).unwrap();
+        assert!(!Merged { matrices: setup.matrices.clone(), assignment: z }.is_satisfied(), "forged opening, witness only");
         assert!(!synthesize_parallel(&shape, Some(&st), Some(&bw), Some(&h), false).unwrap().is_satisfied(), "forged opening, parallel");
         let mut st2 = st.clone();
         st2.states[ss_rap_v2::DEFAULT_RNS_CHANNELS][1].balance += 1;

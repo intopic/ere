@@ -206,3 +206,17 @@ Matjet (4 bërthama, 15 GB RAM, `P3_INLINE=1` / `P3_SYNTH_ONLY=1`):
 Pa matrica (vetëm numërim) 20k kërkon 17.8 s në një fije, por Groth16 i do matricat. Në 1k puna
 totale CPU është ~50 s, pra paralelizimi jep ~4× në 4 bërthama dhe shkallëzohet me bërthamat.
 Forma 20k kërkon makinë me më shumë RAM (≥64 GB) për çdo rrugë, CPU apo GPU.
+
+### Matricat një herë për formë, witness-i për çdo batch
+
+Forma e qarkut është fikse, prandaj matricat R1CS janë gjithmonë të njëjta: ndërtohen një herë
+(`synthesize_parallel(.., setup = true)`, bashkë me çelësat) dhe ruhen. Për çdo batch
+`p3settle::witness_parallel` llogarit vetëm caktimin e vlerave (`Synth::Witness`, arkworks pa
+`finalize`), në të njëjtin rend kolonash; Groth16 provon me `groth16::p3_prove_with`. Testi
+kontrollon që caktimi është identik me atë të sintezës së plotë dhe që hapja e falsifikuar
+refuzohet.
+
+| Forma | Witness për batch, më parë | Tani | Matricat (një herë) |
+|---|---|---|---|
+| 40 tx (fixture) | 9.2 s | 1.7 s | — |
+| 1k tx, blowup 8 × 28 + 16 | 12.7 s | 2.4 s | 11.8 s |

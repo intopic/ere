@@ -50,11 +50,27 @@ pub struct HM31 {
 pub type HE4 = [HM31; 4];
 
 /// A fresh constraint system configured as arkworks' Groth16 configures its own.
-pub fn new_cs(setup: bool) -> Cs {
+pub fn new_cs(kind: Synth) -> Cs {
     let cs = ConstraintSystem::<Fr>::new_ref();
     cs.set_optimization_goal(OptimizationGoal::Constraints);
-    cs.set_mode(if setup { SynthesisMode::Setup } else { SynthesisMode::Prove { construct_matrices: true } });
+    cs.set_mode(match kind {
+        Synth::Setup => SynthesisMode::Setup,
+        Synth::Prove => SynthesisMode::Prove { construct_matrices: true },
+        Synth::Witness => SynthesisMode::Prove { construct_matrices: false },
+    });
     cs
+}
+
+/// What a synthesis produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Synth {
+    /// matrices only (Groth16 setup)
+    Setup,
+    /// matrices and assignment
+    Prove,
+    /// assignment only: the matrices of a fixed shape are computed once (`Setup`) and reused,
+    /// which skips arkworks' `finalize` (most of the synthesis time)
+    Witness,
 }
 
 /// `x` as a plain variable (a symbolic linear combination gets its own witness).
@@ -202,17 +218,25 @@ impl Io {
 
 /// A synthesised child (or parent) constraint system.
 pub struct Part {
-    pub matrices: ConstraintMatrices<Fr>,
+    pub matrices: Option<ConstraintMatrices<Fr>>,
+    pub num_instance: usize,
+    pub num_witness: usize,
     pub instance: Vec<Fr>,
     pub witness: Vec<Fr>,
     pub links: Vec<(usize, Variable)>,
 }
 
-fn finish(cs: Cs, links: Vec<(usize, Variable)>) -> Part {
-    cs.finalize();
-    let matrices = cs.to_matrices().expect("matrices");
-    let b = cs.borrow().unwrap();
-    Part { matrices, instance: b.instance_assignment.clone(), witness: b.witness_assignment.clone(), links }
+fn finish(cs: Cs, links: Vec<(usize, Variable)>, kind: Synth) -> Part {
+    let matrices = if kind == Synth::Witness {
+        None
+    } else {
+        cs.finalize();
+        Some(cs.to_matrices().expect("matrices"))
+    };
+    let (num_instance, num_witness) = (cs.num_instance_variables(), cs.num_witness_variables());
+    let mut b = cs.borrow_mut().unwrap();
+    let (instance, witness) = (std::mem::take(&mut b.instance_assignment), std::mem::take(&mut b.witness_assignment));
+    Part { matrices, num_instance, num_witness, instance, witness, links }
 }
 
 /// Where child bodies run.
@@ -220,7 +244,7 @@ pub enum Par<'s, 'e: 's> {
     /// in the parent's constraint system, now
     Inline(Cs),
     /// on their own threads (scoped: joined before `synthesize` returns), merged afterwards
-    Threads { scope: &'s std::thread::Scope<'s, 'e>, setup: bool, out: std::sync::Arc<std::sync::Mutex<Vec<(usize, R<Part>)>>>, next: RefCell<usize> },
+    Threads { scope: &'s std::thread::Scope<'s, 'e>, kind: Synth, out: std::sync::Arc<std::sync::Mutex<Vec<(usize, R<Part>)>>>, next: RefCell<usize> },
 }
 
 impl<'s, 'e: 's> Par<'s, 'e> {
@@ -233,8 +257,8 @@ impl<'s, 'e: 's> Par<'s, 'e> {
                 let mut io = Io { cs: cs.clone(), mode: Mode::Inline, links: vec![], linked: Default::default() };
                 f(&mut io)
             }
-            Par::Threads { scope, setup, out, next } => {
-                let setup = *setup;
+            Par::Threads { scope, kind, out, next } => {
+                let kind = *kind;
                 let id = {
                     let mut n = next.borrow_mut();
                     *n += 1;
@@ -244,14 +268,14 @@ impl<'s, 'e: 's> Par<'s, 'e> {
                 std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn_scoped(scope, move || {
-                        let cs = new_cs(setup);
+                        let cs = new_cs(kind);
                         let mut io = Io { cs: cs.clone(), mode: Mode::Child, links: vec![], linked: Default::default() };
                         let t0 = std::time::Instant::now();
                         let r = f(&mut io).map(|_| {
                             let t1 = t0.elapsed();
-                            let p = finish(cs, io.links);
+                            let p = finish(cs, std::mem::take(&mut io.links), kind);
                             if std::env::var("P3_STAGES").is_ok() {
-                                eprintln!("  par: child {id}: {} constraints, body {:.2} s + finalize {:.2} s", p.matrices.num_constraints, t1.as_secs_f64(), (t0.elapsed() - t1).as_secs_f64());
+                                eprintln!("  par: child {id}: {} constraints, body {:.2} s + finalize {:.2} s", p.matrices.as_ref().map_or(0, |m| m.num_constraints), t1.as_secs_f64(), (t0.elapsed() - t1).as_secs_f64());
                             }
                             p
                         });
@@ -280,20 +304,37 @@ pub fn synthesize<'e, F>(setup: bool, body: F) -> R<Merged>
 where
     F: for<'s> FnOnce(&Cs, &Par<'s, 'e>) -> R<()>,
 {
+    let (matrices, assignment) = synthesize_kind(if setup { Synth::Setup } else { Synth::Prove }, body)?;
+    Ok(Merged { matrices: matrices.unwrap(), assignment })
+}
+
+/// The full assignment only (`Synth::Witness`), in the column order of the matrices that
+/// `synthesize` builds for the same shape.
+pub fn synthesize_witness<'e, F>(body: F) -> R<Vec<Fr>>
+where
+    F: for<'s> FnOnce(&Cs, &Par<'s, 'e>) -> R<()>,
+{
+    Ok(synthesize_kind(Synth::Witness, body)?.1)
+}
+
+fn synthesize_kind<'e, F>(kind: Synth, body: F) -> R<(Option<ConstraintMatrices<Fr>>, Vec<Fr>)>
+where
+    F: for<'s> FnOnce(&Cs, &Par<'s, 'e>) -> R<()>,
+{
     let stages = std::env::var("P3_STAGES").is_ok();
     let t0 = std::time::Instant::now();
-    let cs = new_cs(setup);
+    let cs = new_cs(kind);
     let out: std::sync::Arc<std::sync::Mutex<Vec<(usize, R<Part>)>>> = Default::default();
     // the parent is finalized while the children still run
     let parent = std::thread::scope(|scope| {
-        let par = Par::Threads { scope, setup, out: out.clone(), next: RefCell::new(0) };
+        let par = Par::Threads { scope, kind, out: out.clone(), next: RefCell::new(0) };
         body(&cs, &par)?;
         if stages {
             eprintln!("  par: parent body {:.2} s", t0.elapsed().as_secs_f64());
         }
-        let p = finish(cs, vec![]);
+        let p = finish(cs, vec![], kind);
         if stages {
-            eprintln!("  par: parent finalized ({} constraints) {:.2} s", p.matrices.num_constraints, t0.elapsed().as_secs_f64());
+            eprintln!("  par: parent finalized ({} constraints) {:.2} s", p.matrices.as_ref().map_or(0, |m| m.num_constraints), t0.elapsed().as_secs_f64());
         }
         Ok::<_, SynthesisError>(p)
     })?;
@@ -304,18 +345,19 @@ where
     kids.sort_by_key(|k| k.0);
     let kids: Vec<Part> = kids.into_iter().map(|k| k.1).collect::<R<_>>()?;
     if stages {
-        let sizes: Vec<usize> = kids.iter().map(|k| k.matrices.num_constraints).collect();
+        let sizes: Vec<usize> = kids.iter().map(|k| k.matrices.as_ref().map_or(0, |m| m.num_constraints)).collect();
         eprintln!("  par: {} children, constraints {:?}", kids.len(), sizes);
     }
-    let m = merge(parent, kids, setup);
+    let m = merge(parent, kids, kind);
     if stages {
         eprintln!("  par: merged {:.2} s", t0.elapsed().as_secs_f64());
     }
     Ok(m)
 }
 
-fn merge(parent: Part, kids: Vec<Part>, setup: bool) -> Merged {
-    let ni = parent.matrices.num_instance_variables;
+fn merge(parent: Part, kids: Vec<Part>, kind: Synth) -> (Option<ConstraintMatrices<Fr>>, Vec<Fr>) {
+    let setup = kind == Synth::Setup;
+    let ni = parent.num_instance;
     let col = |v: &Variable| match v {
         Variable::One => 0,
         Variable::Instance(i) => *i,
@@ -323,11 +365,11 @@ fn merge(parent: Part, kids: Vec<Part>, setup: bool) -> Merged {
         _ => panic!("link to a non-variable"),
     };
     // column of every child witness
-    let mut next = ni + parent.matrices.num_witness_variables;
+    let mut next = ni + parent.num_witness;
     let mut maps = Vec::with_capacity(kids.len());
     for k in &kids {
-        assert_eq!(k.matrices.num_instance_variables, 1);
-        let nw = k.matrices.num_witness_variables;
+        assert_eq!(k.num_instance, 1);
+        let nw = k.num_witness;
         let mut map = vec![usize::MAX; nw];
         for (j, v) in &k.links {
             map[*j] = col(v);
@@ -344,16 +386,18 @@ fn merge(parent: Part, kids: Vec<Part>, setup: bool) -> Merged {
         rows.par_iter_mut().for_each(|r| r.iter_mut().for_each(|t| t.1 = if t.1 == 0 { 0 } else { map[t.1 - 1] }));
         rows
     };
-    let mut a = parent.matrices.a;
-    let mut b = parent.matrices.b;
-    let mut c = parent.matrices.c;
+    let (mut a, mut b, mut c) = match parent.matrices {
+        Some(m) => (m.a, m.b, m.c),
+        None => (vec![], vec![], vec![]),
+    };
     let mut assignment = if setup { vec![] } else { [parent.instance.clone(), parent.witness.clone()].concat() };
     // consume the parts one by one so each child's matrices are freed once copied
     for (k, map) in kids.into_iter().zip(&maps) {
-        let km = k.matrices;
-        a.extend(remap(km.a, map));
-        b.extend(remap(km.b, map));
-        c.extend(remap(km.c, map));
+        if let Some(km) = k.matrices {
+            a.extend(remap(km.a, map));
+            b.extend(remap(km.b, map));
+            c.extend(remap(km.c, map));
+        }
         if !setup {
             for (j, &m) in map.iter().enumerate() {
                 if m >= assignment.len() {
@@ -362,6 +406,9 @@ fn merge(parent: Part, kids: Vec<Part>, setup: bool) -> Merged {
                 }
             }
         }
+    }
+    if kind == Synth::Witness {
+        return (None, assignment);
     }
     let nnz = |m: &Vec<Vec<(Fr, usize)>>| m.iter().map(|r| r.len()).sum();
     let matrices = ConstraintMatrices {
@@ -375,7 +422,7 @@ fn merge(parent: Part, kids: Vec<Part>, setup: bool) -> Merged {
         b,
         c,
     };
-    Merged { matrices, assignment }
+    (Some(matrices), assignment)
 }
 
 impl Merged {

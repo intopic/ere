@@ -6,8 +6,8 @@
 //!   test/P3SettlementFixture.sol     -- header, public input and Groth16 proof
 //! Deterministic: CI re-runs it and fails if the files are out of date. Small shape and few FRI
 //! queries so it runs in CI; NOT the production parameters. `P3_COUNT_ONLY=1` stops after
-//! counting constraints on one thread (any shape); `P3_SYNTH_ONLY=1` stops after the parallel
-//! witness generation and its satisfiability check.
+//! counting constraints on one thread (any shape); `P3_SYNTH_ONLY=1` stops after the shape's
+//! matrices, the batch's witness and the satisfiability check.
 
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::Groth16;
@@ -16,6 +16,7 @@ use ark_snark::SNARK;
 use ss_rap_p3::state::Params;
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
 use ss_rap_settlement::public_input::BatchHeader;
+use ss_rap_settlement::wrapper::par::Merged;
 use ss_rap_settlement::wrapper::p3settle::{self, v_umt_root, P3SettleCircuit, P3SettleShape};
 use std::path::Path;
 use std::time::Instant;
@@ -69,26 +70,33 @@ fn main() {
         println!("  witness generation (1 thread)   : {:.1} s ({:.1} s synthesis + {:.1} s matrices)", t0.elapsed().as_secs_f64(), t_gen.as_secs_f64(), (t0.elapsed() - t_gen).as_secs_f64());
         return;
     }
-    // witness generation on several threads (statement, instances at zeta, FRI query groups)
+    // once per shape: the matrices (and, below, the Groth16 keys)
     let t0 = Instant::now();
-    let m = p3settle::synthesize_parallel(&shape, Some(&st), Some(&w), Some(&h), false).unwrap();
+    let (keys, mx) = if std::env::var("P3_SYNTH_ONLY").is_ok() {
+        (None, p3settle::synthesize_parallel(&shape, None, None, None, true).unwrap().matrices)
+    } else {
+        let (k, mx) = groth16::p3_dev_setup_with_matrices(&shape);
+        (Some(k), mx)
+    };
+    let t_setup = t0.elapsed();
+    // per batch: only the witness, on several threads (statement, instances at zeta, FRI query
+    // groups), in the column order of those matrices
+    let t0 = Instant::now();
+    let z = p3settle::witness_parallel(&shape, &st, &w, &h).unwrap();
     let t_synth = t0.elapsed();
+    let m = Merged { matrices: mx, assignment: z };
     let t0 = Instant::now();
     let ok = m.is_satisfied();
     let t_check = t0.elapsed();
     print_head();
     println!("  constraints                     : {} (satisfied: {ok})", m.matrices.num_constraints);
-    println!("  witness generation (parallel)   : {:.1} s ({} threads; satisfiability check {:.1} s)", t_synth.as_secs_f64(), rayon::current_num_threads(), t_check.as_secs_f64());
+    println!("  matrices (once per shape)       : {:.1} s{}", t_setup.as_secs_f64(), if keys.is_some() { " incl. Groth16 setup (dev)" } else { "" });
+    println!("  witness generation (per batch)  : {:.1} s ({} threads; satisfiability check {:.1} s)", t_synth.as_secs_f64(), rayon::current_num_threads(), t_check.as_secs_f64());
     assert!(ok, "first unsatisfied constraint: {:?}", m.first_unsatisfied());
-    if std::env::var("P3_SYNTH_ONLY").is_ok() {
-        return;
-    }
+    let Some((pk, vk)) = keys else { return };
 
     let t0 = Instant::now();
-    let (pk, vk) = groth16::p3_dev_setup(&shape);
-    let t_setup = t0.elapsed();
-    let t0 = Instant::now();
-    let g = groth16::p3_prove_merged(&pk, &m, 1);
+    let g = groth16::p3_prove_with(&pk, &m.matrices, &m.assignment, 1);
     let t_prove = t0.elapsed();
     let x = h.public_input();
     let t0 = Instant::now();
@@ -150,7 +158,6 @@ library P3SettlementFixture {{
         c0 = c[0], c1 = c[1],
     );
     std::fs::write(root.join("test/P3SettlementFixture.sol"), fixture).unwrap();
-    println!("  Groth16 setup (dev)             : {:.1} s", t_setup.as_secs_f64());
     println!("  Groth16 prove (Plonky3 inside)  : {:.1} s, verify {:.1} ms", t_prove.as_secs_f64(), t_verify.as_secs_f64() * 1e3);
     println!("wrote contracts/P3WrapperVerifier.sol and test/P3SettlementFixture.sol");
 }
