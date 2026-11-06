@@ -6,6 +6,7 @@
 //! - `fees`: the PDF's "mid-price" fee schedule and real per-batch cost accounting.
 //! - `pipeline`: transactions -> batch -> STARK -> public input -> Groth16 -> L1 calldata.
 
+pub mod blob;
 pub mod fees;
 pub mod groth16;
 pub mod pipeline;

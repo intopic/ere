@@ -2,3 +2,4 @@ target/
 out/
 cache/
 target-native/
+contracts/E2EVerifier.sol
