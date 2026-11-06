@@ -60,6 +60,22 @@ contract SSRapSettlementVerifierV2 {
         ) % R_MOD;
     }
 
+    /// @notice The blob hash the proof binds: blobhash(0) when the batch fits in one blob, else
+    /// keccak256 of the versioned hashes of all the transaction's blobs in order, so one proof
+    /// covers every blob (see settlement/src/blob.rs, `blobs_hash`).
+    function blobsHash() public view returns (bytes32) {
+        bytes32 first = blobhash(0);
+        if (first == bytes32(0)) revert MissingEip4844Blob();
+        if (blobhash(1) == bytes32(0)) return first;
+        bytes memory all = abi.encodePacked(first);
+        for (uint256 i = 1; ; i++) {
+            bytes32 h = blobhash(i);
+            if (h == bytes32(0)) break;
+            all = abi.encodePacked(all, h);
+        }
+        return keccak256(all);
+    }
+
     /// @notice Verifies the batch proof and advances the canonical L1 state root.
     function verifyAndSettleBatchV2(
         bytes32 oldStateRoot,
@@ -74,8 +90,7 @@ contract SSRapSettlementVerifierV2 {
         if (batchNumber != latestBatchNumber + 1) revert InvalidBatchSequence();
         if (oldStateRoot != latestStateRoot) revert InvalidStateTransition();
 
-        bytes32 blobHash = blobhash(0);
-        if (blobHash == bytes32(0)) revert MissingEip4844Blob();
+        bytes32 blobHash = blobsHash();
 
         uint256 publicInput = computePublicInput(oldStateRoot, newStateRoot, vUmtMerkleRoot, blobHash, batchNumber);
         if (!verifier.verifyProof(proofA, proofB, proofC, publicInput)) revert InvalidGroth16Proof();

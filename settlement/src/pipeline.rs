@@ -72,10 +72,12 @@ pub struct SettlementPackage {
     pub economics: BatchEconomics,
 }
 
-/// The versioned hash of the blob that carries `data` (the batch's `blob_data`).
+/// The blob hash of `data` (the batch's `blob_data`): the versioned hash of its blob, or, when it
+/// takes several blobs, keccak256 of their versioned hashes (`crate::blob::blobs_hash`).
 pub fn blob_versioned_hash(data: &[u8]) -> Result<[u8; 32], PipelineError> {
-    let blob = crate::blob::to_blob(data).ok_or(PipelineError::BlobTooLarge)?;
-    Ok(crate::blob::versioned_hash(&blob))
+    let blobs = crate::blob::to_blobs(data).ok_or(PipelineError::BlobTooLarge)?;
+    let hashes: Vec<[u8; 32]> = blobs.iter().map(|b| crate::blob::versioned_hash(b)).collect();
+    Ok(crate::blob::blobs_hash(&hashes))
 }
 
 /// Binds the public statement and every STARK commitment (trace, aux, quotient, all FRI

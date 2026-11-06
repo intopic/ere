@@ -83,6 +83,18 @@ contract SSRapSettlementTest {
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
 
+    function test_severalBlobsBindTheirKeccak() public {
+        bytes32[] memory blobs = new bytes32[](3);
+        blobs[0] = F.BLOB_HASH;
+        blobs[1] = bytes32(uint256(2));
+        blobs[2] = bytes32(uint256(3));
+        vm.blobhashes(blobs);
+        require(settlement.blobsHash() == keccak256(abi.encodePacked(blobs[0], blobs[1], blobs[2])), "blobs hash");
+        // the fixture proof binds the single blob, so an extra blob changes the statement
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
+    }
+
     function test_rejectsMissingBlob() public {
         vm.blobhashes(new bytes32[](0));
         vm.expectRevert(SSRapSettlementVerifierV2.MissingEip4844Blob.selector);

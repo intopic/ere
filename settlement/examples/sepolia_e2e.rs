@@ -69,13 +69,20 @@ fn main() {
         let suffix = if i == 0 { String::new() } else { format!("{}", i + 1) };
         let pkg = settle_with(batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default()).expect("pipeline");
         let h = &pkg.header;
-        let blob = blob::to_blob(&batch.blob_data()).unwrap();
-        assert_eq!(blob::versioned_hash(&blob), h.blob_versioned_hash);
-        std::fs::write(out.join(format!("blob{suffix}.bin")), &blob).unwrap();
+        let blobs = blob::to_blobs(&batch.blob_data()).unwrap();
+        let hashes: Vec<[u8; 32]> = blobs.iter().map(|b| blob::versioned_hash(b)).collect();
+        assert_eq!(blob::blobs_hash(&hashes), h.blob_versioned_hash);
+        let mut files = Vec::new();
+        for (j, b) in blobs.iter().enumerate() {
+            let name = if j == 0 { format!("blob{suffix}.bin") } else { format!("blob{suffix}-{j}.bin") };
+            std::fs::write(out.join(&name), b).unwrap();
+            files.push(name);
+        }
         let (a, b, c) = (g1_hex(&pkg.proof.a), g2_calldata(&pkg.proof.b), g1_hex(&pkg.proof.c));
         let env = format!(
-            "TXS={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
+            "TXS={}\nBLOB_FILES={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
             batch.txs.len(),
+            files.join(","),
             hex(&h.old_state_root),
             hex(&h.new_state_root),
             hex(&h.v_umt_root),
@@ -86,7 +93,7 @@ fn main() {
         );
         std::fs::write(out.join(format!("e2e{suffix}.env")), &env).unwrap();
         println!("batch {}: Plonky3 prove {:.1} s, Groth16 prove {:.1} s", h.batch_number, pkg.timings.stark_prove.as_secs_f64(), pkg.timings.groth16_prove.as_secs_f64());
-        println!("  blob: {} bytes of transactions, versioned hash {}", batch.blob_data().len(), hex(&h.blob_versioned_hash));
+        println!("  {} blob(s): {} bytes of transactions, blob hash {}", files.len(), batch.blob_data().len(), hex(&h.blob_versioned_hash));
         print!("{env}");
     }
 }

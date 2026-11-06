@@ -62,15 +62,16 @@ verify_gas=$(cast estimate "$verifier" "verifyProof(uint256[2],uint256[2][2],uin
 echo "verifyProof alone: $verify_gas gas (incl. 21000 base)"
 
 # each batch: calldata plus OUR blob (the one the proof binds), read with blobhash(0)
-settle_batch() {  # <env file> <blob file>; sets tx
+settle_batch() {  # <env file>; sets tx
   # shellcheck disable=SC1090
   source "$1"
+  blob_paths=$(tr ',' '\n' <<<"$BLOB_FILES" | sed "s|^|$out/|" | paste -sd, -)
   calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
     "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C")
   gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
   blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
   nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL" --block pending)
-  tx=$(python3 script/send_blob_tx.py "$2" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
+  tx=$(python3 script/send_blob_tx.py "$blob_paths" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
     $((gas * 2 + 2000000000)) 2000000000 $((blobfee * 2 + 1000000000)))
   [ -n "$tx" ] || { echo "the blob transaction was not accepted"; exit 1; }
   cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" >/dev/null  # waits for inclusion
@@ -91,7 +92,7 @@ batches=${E2E_BATCHES:-2}
 txs_all=()
 for i in $(seq 1 "$batches"); do
   sfx=$([ "$i" = 1 ] || echo "$i")
-  settle_batch "$out/e2e$sfx.env" "$out/blob$sfx.bin"
+  settle_batch "$out/e2e$sfx.env"
   txs_all+=("$tx")
 done
 tx1=${txs_all[0]}
