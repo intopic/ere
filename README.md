@@ -34,8 +34,8 @@ Ne nuk aplikojmë çmime artificialisht të lira ("race to the bottom"), por nj�
 
 ---
 
-6. **`src/rns256.rs`** (i ri në v2.1) — shumëzim modular 256-bit pa bartje mbi 17 kanale RNS për secp256k1 dhe BN254, me teste sulmi.
-7. **`examples/bench_rns256.rs`** — krahasim i drejtë RNS-256 kundrejt metodës klasike me limbs.
+6. **`p3/`** — rruga kryesore e provimit mbi Plonky3 (AIR-et e gjendjes dhe MULMOD, backend Keccak dhe Poseidon2-BN254).
+7. **`archive/recursion/`** — eksperimenti i rekursionit STARK-brenda-STARK dhe `rns256.rs`, i arkivuar (nuk kompilohet).
 8. **`examples/bench_pdf_strategy.rs`** — mat pesë zëvendësimet e strategjisë së PDF-së (verifiko/llogarit, pa bartje, Barrett, batch inversion, V-UMT).
 9. **`.github/workflows/ci.yml`** — GitHub Actions: `cargo test`, të dy benchmark-et dhe kompilimi i kontratës me Foundry.
 10. **`INOVACIONI.md`** — çfarë është e matur, çfarë është hipotezë, dhe çfarë mbetet për t'u bërë.
@@ -49,7 +49,7 @@ cargo test --release
 ```bash
 cargo run --release --example bench_pdf_strategy
 cargo run --release --example bench_stark_mulmod   # provë STARK end-to-end për 5120 MULMOD në 5 korsi
-cargo run --release --example bench_rns256
+cargo run --release -p ss_rap_p3 --example bench_p3_state -- 1000
 forge build && forge test -vv --gas-report   # kontratat + 13 teste me provë nga Rust
 cargo run --release -p ss_rap_settlement --example export_fixture   # Faza C end-to-end: 1000 tx → STARK i gjendjes → Groth16 → L1
 ```
