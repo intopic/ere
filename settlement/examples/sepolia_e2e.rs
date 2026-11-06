@@ -1,4 +1,4 @@
-//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <out_dir>
+//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <out_dir> [txs] [accounts] [log_rows]
 //!
 //! One real batch for a public testnet: signed transfers -> sequencer -> 5-lane Plonky3
 //! batch-STARK -> Plonky3 settlement circuit (Groth16) with the chain's id and the real KZG
@@ -25,20 +25,23 @@ fn main() {
     let chain_id: u64 = args.next().map(|s| s.parse().expect("chain id")).unwrap_or(11155111);
     let out = PathBuf::from(args.next().unwrap_or_else(|| "out/e2e".into()));
     std::fs::create_dir_all(&out).unwrap();
+    let txs: u64 = args.next().map(|s| s.parse().expect("txs")).unwrap_or(20);
+    let accounts: u64 = args.next().map(|s| s.parse().expect("accounts")).unwrap_or(8);
+    let log_rows: usize = args.next().map(|s| s.parse().expect("log_rows")).unwrap_or(5);
 
     let addr = |i: u64| address_of(dev_key(i).verifying_key());
-    let genesis: Vec<([u8; 20], u64)> = (0..8u64).map(|i| (addr(i), 1_000_000)).collect();
-    let mut seq = Sequencer::new(&genesis, 64, FeeSchedule::default());
+    let genesis: Vec<([u8; 20], u64)> = (0..accounts).map(|i| (addr(i), 1_000_000)).collect();
+    let mut seq = Sequencer::new(&genesis, txs as usize, FeeSchedule::default());
     seq.chain_id = chain_id;
-    for k in 0..20u64 {
-        let from = k % 8;
+    for k in 0..txs {
+        let from = k % accounts;
         let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-        seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % 8), 10 + k, (k / 8) as u32, kind, chain_id)).expect("valid tx");
+        seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, (k / accounts) as u32, kind, chain_id)).expect("valid tx");
     }
     let batch = seq.seal();
 
     let t0 = Instant::now();
-    let p = P3Params { log_rows: 5, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
+    let p = P3Params { log_rows, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
     let (prover, (pk, vk)) = P3Prover::new(&batch, p).expect("shape");
     let t_setup = t0.elapsed();
     let cfg = PipelineConfig { chain_id, ..PipelineConfig::default() };
@@ -55,7 +58,8 @@ fn main() {
     .unwrap();
     let (a, b, c) = (g1_hex(&pkg.proof.a), g2_calldata(&pkg.proof.b), g1_hex(&pkg.proof.c));
     let env = format!(
-        "OLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
+        "TXS={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
+        batch.txs.len(),
         hex(&h.old_state_root),
         hex(&h.new_state_root),
         hex(&h.v_umt_root),

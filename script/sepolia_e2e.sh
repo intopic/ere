@@ -30,11 +30,13 @@ wait_code() {
   done
   echo "no code at $1 after 120 s"; return 1
 }
-verifier=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json | jq -r .deployedTo)
+dv=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json)
+verifier=$(jq -r .deployedTo <<<"$dv")
 echo "verifier $verifier"
 wait_code "$verifier"
-settlement=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifierV2 "${send[@]}" --broadcast --json \
-  --constructor-args "$OLD_ROOT" "$me" "$verifier" | jq -r .deployedTo)
+ds=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifierV2 "${send[@]}" --broadcast --json \
+  --constructor-args "$OLD_ROOT" "$me" "$verifier")
+settlement=$(jq -r .deployedTo <<<"$ds")
 echo "settlement $settlement"
 wait_code "$settlement"
 
@@ -46,6 +48,9 @@ echo "verifyProof on-chain: $ok"
 onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,bytes32,uint256)(uint256)" \
   "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BLOB_HASH" "$BATCH" --rpc-url "$SEPOLIA_RPC_URL")
 echo "public input on-chain: $onchain (prover: $PUBLIC_INPUT)"
+verify_gas=$(cast estimate "$verifier" "verifyProof(uint256[2],uint256[2][2],uint256[2],uint256)" \
+  "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL")
+echo "verifyProof alone: $verify_gas gas (incl. 21000 base)"
 
 # the batch itself: calldata plus OUR blob (the one the proof binds), read with blobhash(0)
 calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
@@ -64,3 +69,14 @@ root=$(cast call "$settlement" "latestStateRoot()(bytes32)" --rpc-url "$SEPOLIA_
 [ "$root" = "$NEW_ROOT" ] || { echo "state root is $root, expected $NEW_ROOT"; exit 1; }
 echo "settled: batch $(cast call "$settlement" "latestBatchNumber()(uint256)" --rpc-url "$SEPOLIA_RPC_URL"), state root $root"
 echo "explorer: https://sepolia.etherscan.io/tx/$tx"
+
+# what the same transactions would cost on mainnet, at the fees of the last ~1024 mainnet blocks
+gas_of() { cast receipt "$1" gasUsed --rpc-url "$SEPOLIA_RPC_URL" | awk '{print $1}'; }
+deploy_verifier_gas=$(gas_of "$(jq -r .transactionHash <<<"$dv")")
+deploy_settlement_gas=$(gas_of "$(jq -r .transactionHash <<<"$ds")")
+settle_gas=$(gas_of "$tx")
+blob_gas=$(cast to-dec "$(cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq -r .blobGasUsed)")
+echo "gas: deploy verifier $deploy_verifier_gas, deploy settlement $deploy_settlement_gas, settle $settle_gas, blob gas $blob_gas"
+echo "code size: verifier $(( ($(cast code "$verifier" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes, settlement $(( ($(cast code "$settlement" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes"
+python3 script/mainnet_cost.py "$deploy_verifier_gas" "$deploy_settlement_gas" "$settle_gas" "$blob_gas" "$TXS" \
+  || echo "(mainnet fee estimate unavailable)"
