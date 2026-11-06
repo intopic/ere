@@ -1,4 +1,4 @@
-//! AIR for the Poseidon2-KoalaBear permutation (docs/REKURSIONI.md, R2b): one permutation per
+//! AIR for the Poseidon2-KoalaBear permutation (archive/recursion/REKURSIONI.md, R2b): one permutation per
 //! row, in the KoalaBear lane.
 //!
 //! Every S-box gets 4 columns of degree-2 steps (s^2, ... up to s^7, see `run_at_ch`), so all

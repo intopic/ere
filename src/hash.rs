@@ -23,7 +23,7 @@ pub enum HashMode {
     /// Poseidon2 over KoalaBear (`poseidon2.rs`): what the recursion layer verifies in AIR.
     /// Every lane value is below the KoalaBear prime, so leaves hash the values directly.
     Poseidon2,
-    /// Per-lane mode for the recursion path (docs/REKURSIONI.md, "pemë për korsi"): the proof
+    /// Per-lane mode for the recursion path (archive/recursion/REKURSIONI.md, "pemë për korsi"): the proof
     /// covers lane j only, and its trees and transcript use Poseidon2 over that lane's own
     /// field F_{m_j}, so the lane can be verified entirely inside F_{m_j}.
     Lane(u8),
