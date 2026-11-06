@@ -5,10 +5,14 @@ versioned hash the contract reads with blobhash(0), would not be the ones the pr
 signs our exact 131072-byte blob and checks that its versioned hash is the proven one.
 
 usage: send_blob_tx.py <blob.bin> <expected versioned hash> <to> <calldata> <chain id> <nonce>
-       <max fee> <priority fee> <max blob fee>   (key in SEPOLIA_PRIVATE_KEY); prints the raw tx.
+       <max fee> <priority fee> <max blob fee>   (key in SEPOLIA_PRIVATE_KEY, RPC in SEPOLIA_RPC_URL);
+       sends it with eth_sendRawTransaction (the signed tx, blob included, is too long for argv)
+       and prints the transaction hash.
 """
+import json
 import os
 import sys
+import urllib.request
 
 from eth_account import Account
 from eth_account.typed_transactions import TypedTransaction
@@ -33,4 +37,13 @@ got = TypedTransaction.from_bytes(signed.raw_transaction).transaction.dictionary
 got = "0x" + bytes(got).hex()
 if got.lower() != want.lower():
     sys.exit(f"blob versioned hash {got} is not the proven {want}")
-print("0x" + signed.raw_transaction.hex().removeprefix("0x"))
+raw = "0x" + signed.raw_transaction.hex().removeprefix("0x")
+req = urllib.request.Request(
+    os.environ["SEPOLIA_RPC_URL"],
+    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw]}).encode(),
+    headers={"content-type": "application/json"},
+)
+reply = json.load(urllib.request.urlopen(req, timeout=60))
+if "error" in reply:
+    sys.exit(f"eth_sendRawTransaction: {reply['error']}")
+print(reply["result"])

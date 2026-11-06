@@ -53,9 +53,8 @@ calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256
 gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
 blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
 nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
-raw=$(python3 script/send_blob_tx.py "$out/blob.bin" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
+tx=$(python3 script/send_blob_tx.py "$out/blob.bin" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
   $((gas * 2 + 2000000000)) 2000000000 $((blobfee * 2 + 1000000000)))
-tx=$(cast publish "$raw" --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"' | grep -o '0x[0-9a-fA-F]\{64\}' | head -1)
 [ -n "$tx" ] || { echo "the blob transaction was not accepted"; exit 1; }
 cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" >/dev/null  # waits for inclusion
 echo "batch transaction $tx"
