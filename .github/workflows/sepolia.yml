@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
+      - name: Python signer for blob transactions
+        run: pip install "eth-account==0.14.0"
       - name: Settle the batch
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
