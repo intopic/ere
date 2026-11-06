@@ -1237,7 +1237,12 @@ dependencies = [
  "ark-std",
  "blake3",
  "num-bigint 0.4.8",
+ "num-bigint 0.5.1",
+ "p3-bn254",
+ "p3-field",
+ "p3-symmetric",
  "rand_chacha",
+ "ss_rap_p3",
  "ss_rap_v2",
  "tiny-keccak",
 ]
