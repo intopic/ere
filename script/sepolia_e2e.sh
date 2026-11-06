@@ -13,6 +13,7 @@ set -euo pipefail
 out=out/e2e
 chain=$(cast chain-id --rpc-url "$SEPOLIA_RPC_URL")
 me=$(cast wallet address --private-key "$SEPOLIA_PRIVATE_KEY")
+cast --version
 echo "chain $chain, sender $me, balance $(cast balance "$me" --rpc-url "$SEPOLIA_RPC_URL" --ether) ETH"
 
 cargo run --release --locked -p ss_rap_settlement --example sepolia_e2e -- "$chain" "$out"
@@ -47,10 +48,16 @@ onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,by
 echo "public input on-chain: $onchain (prover: $PUBLIC_INPUT)"
 
 # the batch itself: calldata plus the blob the contract reads with blobhash(0)
-tx=$(cast send "$settlement" \
+set +e
+cast send "$settlement" \
   "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
   "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C" \
-  --blob --path "$out/blob.bin" "${send[@]}" --json | jq -r .transactionHash)
+  --blob --path "$out/blob.bin" "${send[@]}" --json > "$out/send.out" 2>&1
+rc=$?
+set -e
+echo "cast send exit $rc:"; cat "$out/send.out"; echo
+[ "$rc" = 0 ] || exit 1
+tx=$(jq -r .transactionHash "$out/send.out")
 echo "batch transaction $tx"
 cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq '{status,blockNumber,gasUsed,blobGasUsed,blobGasPrice}'
 
