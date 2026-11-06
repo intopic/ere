@@ -198,7 +198,7 @@ mod tests {
     fn pairs(n: usize) -> Vec<([u32; WIDTH], [u32; WIDTH])> {
         (0..n)
             .map(|k| {
-                let inp: [u32; WIDTH] = std::array::from_fn(|i| (k * 31 + i * 7) as u32 * 2654435761 % crate::poseidon2::P);
+                let inp: [u32; WIDTH] = std::array::from_fn(|i| ((k * 31 + i * 7) as u32).wrapping_mul(2654435761) % crate::poseidon2::P);
                 let mut out = inp;
                 permute(&mut out);
                 (inp, out)
