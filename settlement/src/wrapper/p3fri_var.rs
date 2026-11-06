@@ -91,7 +91,7 @@ pub fn e4_canon(cs: &ConstraintSystemRef<Fr>, x: &E4) -> Result<E4, SynthesisErr
     Ok(E4 { c: [c[0].clone(), c[1].clone(), c[2].clone(), c[3].clone()] })
 }
 
-fn e4_const(x: [u32; 4]) -> E4 {
+pub fn e4_const(x: [u32; 4]) -> E4 {
     E4 { c: x.map(|v| M31::constant(v, CH)) }
 }
 
@@ -134,14 +134,14 @@ fn pow_bits(cs: &ConstraintSystemRef<Fr>, base: u32, bits: &[Boolean<Fr>]) -> Re
     Ok(acc)
 }
 
-fn observe_e4(ch: &mut ChallengerVar, x: &E4) -> Result<(), SynthesisError> {
+pub fn observe_e4(ch: &mut ChallengerVar, x: &E4) -> Result<(), SynthesisError> {
     for c in &x.c {
         ch.observe(&c.v)?;
     }
     Ok(())
 }
 
-fn sample_e4(ch: &mut ChallengerVar) -> Result<E4, SynthesisError> {
+pub fn sample_e4(ch: &mut ChallengerVar) -> Result<E4, SynthesisError> {
     let c: Vec<M31> = (0..4).map(|_| ch.sample().map(|s| M31 { v: s.value, bound: BigUint::from(P), ch: CH })).collect::<Result<_, _>>()?;
     Ok(E4 { c: [c[0].clone(), c[1].clone(), c[2].clone(), c[3].clone()] })
 }
