@@ -61,3 +61,24 @@ prodhimi duhet të kalojë te konstantet e referencës (zkhash RC3).
 |---|---|---|
 | 1 000 | 0.27 s | 0.78 s |
 | 20 000 | 3.3 s | 12.1 s |
+
+## Unifikimi i korsive në BabyBear
+
+Të 5 korsitë tani provohen mbi BabyBear (`p3/src/state.rs`: `StateProof { lanes: [..; 5] }`).
+U hoqën KoalaBear, Lane3–Lane5, `p3/src/fields.rs` dhe `scripts/gen_lane_fields.py`.
+Korsitë mbeten 5 prova të pavarura (secila me pjesën e vet të transfertave), testet e falsifikimit
+kalojnë për çdo korsi.
+
+Matje (native, AVX-512), pa ndryshim të dukshëm shpejtësie kundrejt fushave të ndryshme:
+
+| | Prove |
+|---|---|
+| MULMOD 20,480 (5 × 4096), blowup 2 × 100 | 0.37 s |
+| Gjendja 20,000 transferta, Keccak | 0.21 s |
+| Gjendja 20,000 transferta, Poseidon2-BN254 | 4.0 s |
+
+Shënim për qarkun Groth16: kostoja në qark varet kryesisht nga numri i provave dhe i query-ve
+(hash Poseidon2-BN254 i shtigjeve Merkle), jo nga sa fusha përdoren. Fitimi i unifikimit është
+një gadget i vetëm aritmetike BabyBear (më pak kod, më pak rrezik), jo 3–5× më pak kufizime vetë.
+Ulja reale vjen nga bashkimi i 5 korsive në një provë të vetme (një trace më i gjatë ose një
+batch) dhe nga më pak query (p.sh. blowup 16 × 25), gjë që po e bëj te P4b.

@@ -1,4 +1,4 @@
-//! The state-transition AIR (`ss_rap_v2::state`) on Plonky3, one proof per RNS lane.
+//! The state-transition AIR (`ss_rap_v2::state`) on Plonky3, one BabyBear proof per lane (the 5 lanes split the transfers).
 //!
 //! Same columns and constraints as the in-house AIR. The two buses become named Plonky3 buses:
 //! "mem" (offline memory check: id, nonce, ts, balance bytes) and "tx" (t, from, to, nonce,
@@ -272,19 +272,16 @@ macro_rules! backend {
     ($m:ident, $cfg:path) => {
         pub mod $m {
             use super::*;
-            use crate::config::{BabyBear, KoalaBear, Lane3, Lane4, Lane5};
+            use crate::config::BabyBear;
             use $cfg as cfgmod;
             use cfgmod::{config, Config};
             use p3_batch_stark::{prove_batch, verify_batch, BatchProof, ProverData, StarkInstance};
             use p3_field::extension::BinomiallyExtendable;
             use p3_field::{PrimeField32, TwoAdicField};
 
+            /// One BabyBear batch proof per lane (the lanes split the transfers; same field).
             pub struct StateProof {
-                pub l0: BatchProof<Config<BabyBear>>,
-                pub l1: BatchProof<Config<KoalaBear>>,
-                pub l2: BatchProof<Config<Lane3>>,
-                pub l3: BatchProof<Config<Lane4>>,
-                pub l4: BatchProof<Config<Lane5>>,
+                pub lanes: [BatchProof<Config<BabyBear>>; 5],
             }
 
             pub fn prove_lane<F>(st: &StateStatement, trace: &[Vec<u32>], lane: usize, p: &Params) -> BatchProof<Config<F>>
@@ -314,13 +311,7 @@ macro_rules! backend {
 
             /// Proves the 5 lanes (one after another; each uses all cores).
             pub fn prove(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> StateProof {
-                StateProof {
-                    l0: prove_lane::<BabyBear>(st, &traces[0], 0, p),
-                    l1: prove_lane::<KoalaBear>(st, &traces[1], 1, p),
-                    l2: prove_lane::<Lane3>(st, &traces[2], 2, p),
-                    l3: prove_lane::<Lane4>(st, &traces[3], 3, p),
-                    l4: prove_lane::<Lane5>(st, &traces[4], 4, p),
-                }
+                StateProof { lanes: std::array::from_fn(|l| prove_lane::<BabyBear>(st, &traces[l], l, p)) }
             }
 
             /// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).
@@ -329,11 +320,7 @@ macro_rules! backend {
                     && st.well_formed(1 << p.log_rows)
                     && &st.old_root() == old_root
                     && &st.new_root() == new_root
-                    && verify_lane::<BabyBear>(st, &proof.l0, 0, p)
-                    && verify_lane::<KoalaBear>(st, &proof.l1, 1, p)
-                    && verify_lane::<Lane3>(st, &proof.l2, 2, p)
-                    && verify_lane::<Lane4>(st, &proof.l3, 3, p)
-                    && verify_lane::<Lane5>(st, &proof.l4, 4, p)
+                    && (0..5).all(|l| verify_lane::<BabyBear>(st, &proof.lanes[l], l, p))
             }
         }
     };
@@ -347,7 +334,7 @@ pub use keccak::{prove, verify, StateProof};
 mod tests {
     use super::keccak::verify_lane;
     use super::*;
-    use crate::config::{BabyBear, KoalaBear, Lane3, Lane4, Lane5};
+    use crate::config::BabyBear;
     use ss_rap_v2::state::{build, AccountState, Transfer};
 
     fn case(n_tx: u32, log_rows: u32) -> (StateStatement, [Vec<Vec<u32>>; 5]) {
@@ -376,19 +363,19 @@ mod tests {
         // a different final balance in lane 2's output table
         let mut bad = st.clone();
         bad.states[3][4].balance += 1;
-        assert!(!verify_lane::<Lane3>(&bad, &proof.l2, 2, &P), "final table of lane 2");
-        assert!(!verify_lane::<Lane4>(&bad, &proof.l3, 3, &P), "initial table of lane 3");
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[2], 2, &P), "final table of lane 2");
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[3], 3, &P), "initial table of lane 3");
         // a different transaction in lane 0
         let mut bad = st.clone();
         bad.lanes[0][5].amount += 1;
-        assert!(!verify_lane::<BabyBear>(&bad, &proof.l0, 0, &P), "tx amount");
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[0], 0, &P), "tx amount");
         let mut bad = st.clone();
         bad.lanes[1].swap(0, 1);
-        assert!(!verify_lane::<KoalaBear>(&bad, &proof.l1, 1, &P), "tx order");
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[1], 1, &P), "tx order");
         // a dropped transaction
         let mut bad = st.clone();
         assert!(bad.lanes[4].pop().is_some());
-        assert!(!verify_lane::<Lane5>(&bad, &proof.l4, 4, &P), "dropped tx");
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[4], 4, &P), "dropped tx");
     }
 
     #[test]
@@ -398,7 +385,7 @@ mod tests {
         assert!(poseidon2_bn254::verify(&st, &st.old_root(), &st.new_root(), &proof, &P));
         let mut bad = st.clone();
         bad.lanes[2][0].to ^= 1;
-        assert!(!poseidon2_bn254::verify_lane::<Lane3>(&bad, &proof.l2, 2, &P));
+        assert!(!poseidon2_bn254::verify_lane::<BabyBear>(&bad, &proof.lanes[2], 2, &P));
     }
 
     #[test]

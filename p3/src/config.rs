@@ -12,9 +12,7 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 use p3_uni_stark::StarkConfig;
 
-pub use crate::fields::{Lane3, Lane4, Lane5};
 pub use p3_baby_bear::BabyBear;
-pub use p3_koala_bear::KoalaBear;
 
 type U64Hash = PaddingFreeSponge<KeccakF, 25, 17, 4>;
 type FieldHash = SerializingHasher<U64Hash>;

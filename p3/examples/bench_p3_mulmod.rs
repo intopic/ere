@@ -1,4 +1,4 @@
-//! MULMOD on Plonky3 in all 5 RNS lanes vs the in-house engine (`bench_stark_mulmod`).
+//! MULMOD on Plonky3 in 5 parallel lanes (all BabyBear) vs the in-house engine (`bench_stark_mulmod`).
 //! Each lane proves its own 2^log_rows operations (lanes are independent, as in the in-house
 //! engine), so the batch is 5 * 2^log_rows.
 //! cargo run --release -p ss_rap_p3 --example bench_p3_mulmod [log_rows] [log_blowup] [queries] [budget]
@@ -6,7 +6,7 @@ use num_bigint::BigUint;
 use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
 use p3_field::extension::BinomiallyExtendable;
 use p3_field::{PrimeField32, TwoAdicField};
-use ss_rap_p3::config::{config, BabyBear, Config, KoalaBear, Lane3, Lane4, Lane5};
+use ss_rap_p3::config::{config, BabyBear, Config};
 use ss_rap_p3::mulmod::{ByteTableAir, MulModAir, MulModAirs};
 use ss_rap_v2::uint256::{Modulus256, MulModRow};
 use std::time::{Duration, Instant};
@@ -51,14 +51,8 @@ fn main() {
     };
     let n = 1usize << log_rows;
     let rows: Vec<Vec<MulModRow>> = (0..5).map(|_| (0..n).map(|_| MulModRow::generate(&next(), &next(), &p)).collect()).collect();
-    println!("plonky3 MULMOD secp256k1: {} ops in 5 RNS lanes ({n}/lane), blowup {}, {queries} queries, lookup budget {budget}", 5 * n, 1 << log_blowup);
-    let r = [
-        lane::<BabyBear>("BabyBear", &rows[0], &p, log_rows, log_blowup, queries, budget),
-        lane::<KoalaBear>("KoalaBear", &rows[1], &p, log_rows, log_blowup, queries, budget),
-        lane::<Lane3>("Lane3", &rows[2], &p, log_rows, log_blowup, queries, budget),
-        lane::<Lane4>("Lane4", &rows[3], &p, log_rows, log_blowup, queries, budget),
-        lane::<Lane5>("Lane5", &rows[4], &p, log_rows, log_blowup, queries, budget),
-    ];
+    println!("plonky3 MULMOD secp256k1: {} ops in 5 BabyBear lanes ({n}/lane), blowup {}, {queries} queries, lookup budget {budget}", 5 * n, 1 << log_blowup);
+    let r: Vec<_> = (0..5).map(|l| lane::<BabyBear>(&format!("lane {l}"), &rows[l], &p, log_rows, log_blowup, queries, budget)).collect();
     let total: Duration = r.iter().map(|x| x.0).sum();
     println!("  total prove {total:.2?} ({:.1} us per MULMOD), lanes one after another on all cores", total.as_secs_f64() * 1e6 / (5 * n) as f64);
 }
