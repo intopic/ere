@@ -25,4 +25,5 @@ pub mod hash_var;
 pub mod poseidon2_var;
 pub mod challenger_var;
 pub mod p3fri_var;
+pub mod p3air_eval;
 

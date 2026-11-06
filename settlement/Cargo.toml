@@ -20,8 +20,6 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 num-bigint = "0.4"
 rand_chacha = "0.3"
 blake3 = "1.5"
-
-[dev-dependencies]
 ss_rap_p3 = { path = "../p3" }
 p3-bn254 = "=0.9.0-rc.2"
 p3-field = "=0.9.0-rc.2"
@@ -32,3 +30,6 @@ p3-uni-stark = "=0.9.0-rc.2"
 p3-util = "=0.9.0-rc.2"
 p3-symmetric = "=0.9.0-rc.2"
 num-bigint-05 = { package = "num-bigint", version = "0.5" }
+p3-air = "=0.9.0-rc.2"
+p3-batch-stark = "=0.9.0-rc.2"
+p3-lookup = "=0.9.0-rc.2"
