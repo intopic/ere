@@ -389,7 +389,7 @@ mod tests {
         for (i, air) in airs.iter().enumerate() {
             let ov = &proof.opened_values.instances[i];
             let pre_w = air.preprocessed_width();
-            let layout = AirLayout { preprocessed_width: pre_w, main_width: air.width(), num_public_values: 0, num_periodic_columns: air.num_periodic_columns(), ..Default::default() };
+            let layout = AirLayout { preprocessed_width: pre_w, main_width: air.width(), num_public_values: air.num_public_values(), num_periodic_columns: air.num_periodic_columns(), ..Default::default() };
             let (base, ext) = p3_batch_stark::symbolic::get_symbolic_constraints::<F, EF, _, _>(air, layout, &lookups[i], &LogUpGadget::new());
             let log_n = degs[i];
             let mut c = Native;

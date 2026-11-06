@@ -10,6 +10,14 @@
 //! as public columns: the prover cannot change them, and Plonky3's terminal-sum check
 //! (all buses sum to zero) then gives exactly init + writes = reads + final and
 //! "every public transaction executed once, at its index".
+//!
+//! Fiat-Shamir binding of the statement: `p3-batch-stark` 0.9.0-rc.2 does NOT observe periodic
+//! columns (nor `BaseAir::periodic_statement`) in its transcript. Without more, a prover could
+//! commit a public trace with made-up tuples, learn zeta, and only then pick a statement whose
+//! periodic columns satisfy the one combined check at zeta. So the lane-0 public AIR declares
+//! `DIGEST_LIMBS` public values, the statement digest (`StateStatement::digest`, Poseidon-BN254)
+//! in 30-bit limbs: Plonky3 observes public values right after the main commitment, before
+//! any challenge, and the verifier recomputes them from the statement it is given.
 use crate::mulmod::ByteTableAir;
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -90,6 +98,23 @@ const PUB_MEM: usize = 11;
 const PUB_TX: usize = 12;
 const PUB_COLS: usize = PUB_MEM + 1 + PUB_TX + 1;
 
+/// Public values of the lane-0 public AIR: the statement digest in 30-bit limbs.
+pub const DIGEST_LIMBS: usize = 9;
+pub const LIMB_BITS: usize = 30;
+
+/// The statement digest (LE bytes of a BN254 element) as `DIGEST_LIMBS` limbs of `LIMB_BITS`.
+pub fn digest_limbs(st: &StateStatement) -> Vec<u32> {
+    let d = st.digest();
+    let bit = |i: usize| if i < 256 { ((d[i / 8] >> (i % 8)) & 1) as u32 } else { 0 };
+    (0..DIGEST_LIMBS).map(|k| (0..LIMB_BITS).map(|b| bit(k * LIMB_BITS + b) << b).sum()).collect()
+}
+
+/// The public values of every AIR in `airs` (the digest limbs where an AIR declares them).
+pub fn public_values<F: Field>(st: &StateStatement, airs: &[LaneAirs<F>]) -> Vec<Vec<F>> {
+    let limbs: Vec<F> = digest_limbs(st).into_iter().map(F::from_u32).collect();
+    airs.iter().map(|a| if a.num_public_values() > 0 { limbs.clone() } else { vec![] }).collect()
+}
+
 /// The public side of the "mem" and "tx" buses for lane `lane`, as periodic columns.
 #[derive(Clone, Debug)]
 pub struct PublicAir<F> {
@@ -150,6 +175,9 @@ impl<F: Field> BaseAir<F> for PublicAir<F> {
     fn num_periodic_columns(&self) -> usize {
         PUB_COLS
     }
+    fn num_public_values(&self) -> usize {
+        if self.lane == 0 { DIGEST_LIMBS } else { 0 }
+    }
     fn periodic_columns(&self) -> Cow<'_, [Vec<F>]> {
         Cow::Borrowed(&self.cols)
     }
@@ -204,6 +232,12 @@ impl<F: Field> BaseAir<F> for LaneAirs<F> {
     fn num_periodic_columns(&self) -> usize {
         match self {
             Self::Public(a) => a.num_periodic_columns(),
+            _ => 0,
+        }
+    }
+    fn num_public_values(&self) -> usize {
+        match self {
+            Self::Public(a) => <PublicAir<F> as BaseAir<F>>::num_public_values(a),
             _ => 0,
         }
     }
@@ -344,7 +378,8 @@ macro_rules! backend {
                 let (airs, traces, degs) = lane_instance::<F>(st, trace, lane);
                 let pd = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; 3], p.log_blowup).unwrap();
                 let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
-                let inst = StarkInstance::new_multiple(&airs, &refs, &[vec![], vec![], vec![]]);
+                let pv = public_values(st, &airs);
+                let inst = StarkInstance::new_multiple(&airs, &refs, &pv);
                 prove_batch(&cfg, &inst, &pd).expect("prove")
             }
 
@@ -357,7 +392,7 @@ macro_rules! backend {
                 let Ok(pd) = ProverData::<Config<F>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degrees(st, lane, p), &vec![p.budget; 3], p.log_blowup) else {
                     return false;
                 };
-                verify_batch(&cfg, &airs, proof, &[vec![], vec![], vec![]], &pd.common).is_ok()
+                verify_batch(&cfg, &airs, proof, &public_values(st, &airs), &pd.common).is_ok()
             }
 
             /// Proves the 5 lanes (one after another; each uses all cores).
@@ -375,7 +410,8 @@ macro_rules! backend {
                 let (airs, traces, degs) = all_instance::<BabyBear>(st, traces);
                 let pd = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
                 let refs: Vec<&RowMajorMatrix<BabyBear>> = traces.iter().collect();
-                let inst = StarkInstance::new_multiple(&airs, &refs, &vec![vec![]; airs.len()]);
+                let pv = public_values(st, &airs);
+                let inst = StarkInstance::new_multiple(&airs, &refs, &pv);
                 prove_batch(&cfg, &inst, &pd).expect("prove")
             }
 
@@ -389,7 +425,7 @@ macro_rules! backend {
                 let Ok(pd) = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup) else {
                     return false;
                 };
-                verify_batch(&cfg, &airs, proof, &vec![vec![]; airs.len()], &pd.common).is_ok()
+                verify_batch(&cfg, &airs, proof, &public_values(st, &airs), &pd.common).is_ok()
             }
 
             /// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).

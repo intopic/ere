@@ -137,7 +137,8 @@ pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -
     let (airs, traces, degs) = all_instance::<F>(st, traces);
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
-    let inst = StarkInstance::new_multiple(&airs, &refs, &vec![vec![]; airs.len()]);
+    let pv = crate::state::public_values(st, &airs);
+    let inst = StarkInstance::new_multiple(&airs, &refs, &pv);
     prove_batch(&cfg, &inst, &pd).expect("prove")
 }
 
@@ -148,7 +149,7 @@ pub fn verify_one(st: &StateStatement, proof: &BatchProof<Config>, p: &Params) -
     let airs = all_airs::<F>(st);
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     log.lock().unwrap().clear();
-    let ok = verify_batch(&cfg, &airs, proof, &vec![vec![]; airs.len()], &pd.common).is_ok();
+    let ok = verify_batch(&cfg, &airs, proof, &crate::state::public_values(st, &airs), &pd.common).is_ok();
     let ops = log.lock().unwrap().clone();
     (ok, ops)
 }

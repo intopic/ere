@@ -216,6 +216,47 @@ impl StatementVar {
         out
     }
 
+    /// The periodic columns of `ss_rap_p3::state::PublicAir::new(st, lane)` (BabyBear): initial
+    /// accounts (weight -1), final accounts (+1), then the lane's transfers (+1), padded to a
+    /// power of two (at least 4) with zero rows.
+    pub fn p3_public_cols(&self, lane: usize) -> Vec<Vec<M31>> {
+        const P: u32 = 2013265921;
+        let val = |x: &Int, bits: u64| M31 { v: x.v.clone(), bound: BigUint::from(1u64) << bits, ch: 0 };
+        let k = |c: u32| M31::constant(c, 0);
+        let zeros = |n: usize| vec![k(0); n];
+        let mut rows: Vec<Vec<M31>> = Vec::new();
+        for (t, w) in [(lane, P - 1), (lane + 1, 1)] {
+            for (id, s) in self.states[t].iter().enumerate() {
+                let ts = if t == lane { k(0) } else { val(&self.final_ts[lane][id], 31) };
+                let mut r = vec![k(id as u32), val(&s.nonce, 30), ts];
+                r.extend(s.bytes.iter().map(|b| val(b, 8)));
+                r.push(k(w));
+                r.extend(zeros(13));
+                rows.push(r);
+            }
+        }
+        for (j, tx) in self.lanes[lane].iter().enumerate() {
+            let mut r = zeros(12);
+            r.extend([k(j as u32 + 1), val(&tx.from, 31), val(&tx.to, 31), val(&tx.nonce, 30)]);
+            r.extend(tx.bytes.iter().map(|b| val(b, 8)));
+            r.push(k(1));
+            rows.push(r);
+        }
+        let n = rows.len().next_power_of_two().max(4);
+        rows.resize(n, zeros(25));
+        (0..25).map(|j| rows.iter().map(|r| r[j].clone()).collect()).collect()
+    }
+
+    /// The digest as `ss_rap_p3::state::digest_limbs` (30-bit limbs of its canonical bits).
+    pub fn digest_limbs(&self) -> R<Vec<FpVar<Fr>>> {
+        use ark_r1cs_std::boolean::Boolean;
+        use ark_r1cs_std::prelude::ToBitsGadget;
+        let bits = self.digest.to_bits_le()?;
+        let (n, lb) = (ss_rap_p3::state::DIGEST_LIMBS, ss_rap_p3::state::LIMB_BITS);
+        assert!(n * lb >= bits.len());
+        (0..n).map(|i| Boolean::le_bits_to_fp(&bits[(i * lb).min(bits.len())..((i + 1) * lb).min(bits.len())])).collect()
+    }
+
     pub fn num_txs(&self) -> usize {
         self.shape.lane_txs.iter().sum()
     }
@@ -273,6 +314,20 @@ mod tests {
                 assert_eq!(a.values, vals.iter().map(|v| v.value().unwrap()).collect::<Vec<_>>());
             }
         }
+        // the Plonky3 public AIRs' periodic columns and the digest limbs
+        type BB = p3_baby_bear::BabyBear;
+        use p3_field::PrimeField32;
+        for lane in 0..DEFAULT_RNS_CHANNELS {
+            let native = ss_rap_p3::state::PublicAir::<BB>::new(&st, lane).cols;
+            let circ = sv.p3_public_cols(lane);
+            assert_eq!(native.len(), circ.len());
+            for (a, b) in native.iter().zip(&circ) {
+                assert_eq!(a.iter().map(|x| x.as_canonical_u32()).collect::<Vec<_>>(), b.iter().map(|v| v.value().unwrap()).collect::<Vec<_>>());
+            }
+        }
+        let limbs: Vec<Fr> = sv.digest_limbs().unwrap().iter().map(|x| x.value().unwrap()).collect();
+        assert_eq!(limbs, ss_rap_p3::state::digest_limbs(&st).into_iter().map(|v| Fr::from(v as u64)).collect::<Vec<_>>());
+        assert!(cs.is_satisfied().unwrap());
         eprintln!("statement ({} accounts, {} txs): {} constraints", shape.accounts, st.num_txs(), cs.num_constraints());
     }
 

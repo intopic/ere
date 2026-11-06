@@ -80,6 +80,28 @@ fn u256_be_bits(cs: &ConstraintSystemRef<Fr>, x: Option<u64>) -> Result<Vec<Bool
     Ok(out)
 }
 
+/// x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId) mod r, with the
+/// three roots given as circuit values and the other header fields as free witnesses.
+pub fn bind_header(cs: &ConstraintSystemRef<Fr>, x: &FpVar<Fr>, old_root: &FpVar<Fr>, new_root: &FpVar<Fr>, v_umt: &FpVar<Fr>, header: Option<&BatchHeader>) -> Result<(), SynthesisError> {
+    let cs = cs.clone();
+    let mut msg = Vec::with_capacity(192 * 8);
+    msg.extend(fr_bits(old_root)?);
+    msg.extend(fr_bits(new_root)?);
+    msg.extend(fr_bits(v_umt)?);
+    msg.extend(bits_of_bytes(&cs, header.map(|h| h.blob_versioned_hash.as_slice()), 32)?);
+    msg.extend(u256_be_bits(&cs, header.map(|h| h.batch_number))?);
+    msg.extend(u256_be_bits(&cs, header.map(|h| h.chain_id))?);
+    let hash = keccak256(&msg)?;
+    // big-endian uint256 mod r
+    let mut acc = FpVar::zero();
+    for byte in hash.chunks(8) {
+        let b = Boolean::le_bits_to_fp(byte)?;
+        acc = acc * Fr::from(256u64) + b;
+    }
+    acc.enforce_equal(x)?;
+    Ok(())
+}
+
 impl ConstraintSynthesizer<Fr> for SettleCircuit<'_> {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let x = FpVar::new_input(cs.clone(), || self.header.map(|h| h.public_input()).ok_or(SynthesisError::AssignmentMissing))?;
@@ -96,21 +118,7 @@ impl ConstraintSynthesizer<Fr> for SettleCircuit<'_> {
         s.absorb(&v)?;
         let v_umt = s.squeeze_field_elements(1)?.remove(0);
 
-        let mut msg = Vec::with_capacity(192 * 8);
-        msg.extend(fr_bits(&old_root)?);
-        msg.extend(fr_bits(&new_root)?);
-        msg.extend(fr_bits(&v_umt)?);
-        msg.extend(bits_of_bytes(&cs, self.header.map(|h| h.blob_versioned_hash.as_slice()), 32)?);
-        msg.extend(u256_be_bits(&cs, self.header.map(|h| h.batch_number))?);
-        msg.extend(u256_be_bits(&cs, self.header.map(|h| h.chain_id))?);
-        let hash = keccak256(&msg)?;
-        // big-endian uint256 mod r
-        let mut acc = FpVar::zero();
-        for byte in hash.chunks(8) {
-            let b = Boolean::le_bits_to_fp(byte)?;
-            acc = acc * Fr::from(256u64) + b;
-        }
-        acc.enforce_equal(&x)?;
+        bind_header(&cs, &x, &old_root, &new_root, &v_umt, self.header)?;
         Ok(())
     }
 }

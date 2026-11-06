@@ -11,11 +11,14 @@
 //! 4. the lookup terminals sum to zero.
 //!
 //! The preprocessed commitment (the byte table) and every shape value are constants of the
-//! circuit; the statement enters through the periodic columns of the public AIRs.
+//! circuit. The statement enters as a witness (`PublicIo`): the periodic columns of the public
+//! AIRs, evaluated at zeta from witness values, and the statement digest, which Plonky3 observes
+//! as the lane-0 public values right after the main commitment (so every challenge depends on
+//! the statement).
 
 use super::challenger_var::ChallengerVar;
 use super::fp31::{E4, M31};
-use super::p3air_eval::{periodic_at, recompose, selectors, Ctx, Eval, Point, EF, F, R};
+use super::p3air_eval::{pow_u32, recompose, selectors, Ctx, Eval, Point, EF, F, R};
 use super::p3fri_var::{bn_to_fr, e4_const, e4_inverse, e4_witness, ef_u32, fri_witness, observe_e4, sample_e4, verify_pcs, FriProofVar, FriShape, FriWitness, MatShape, TWO_ADIC_GENERATORS};
 use ark_bn254::Fr;
 use ark_r1cs_std::alloc::AllocVar;
@@ -107,11 +110,15 @@ pub struct InstShape {
     pub base: Vec<SymbolicExpression<F>>,
     pub ext: Vec<SymbolicExpressionExt<F, EF>>,
     pub periodic: Vec<Vec<u32>>,
+    /// the lane of a public AIR (whose periodic columns come from the statement)
+    pub public_lane: Option<usize>,
     pub bus: Vec<usize>,
 }
 
 pub struct BatchShape {
     pub inst: Vec<InstShape>,
+    /// instances with public values (observed after the main commitment), with their count
+    pub public_values: Vec<(usize, usize)>,
     /// widest lookup tuple (the bus offset is beta^width)
     pub lookup_width: usize,
     pub seed: Vec<u32>,
@@ -158,7 +165,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
             })
             .collect();
         let pre_width = air.preprocessed_width();
-        let layout = AirLayout { preprocessed_width: pre_width, main_width: air.width(), num_public_values: 0, num_periodic_columns: air.num_periodic_columns(), ..Default::default() };
+        let layout = AirLayout { preprocessed_width: pre_width, main_width: air.width(), num_public_values: air.num_public_values(), num_periodic_columns: air.num_periodic_columns(), ..Default::default() };
         let (base, ext) = p3_batch_stark::symbolic::get_symbolic_constraints::<F, EF, _, _>(air, layout, &lookups[i], &LogUpGadget::new());
         let log_n = degree_bits[i];
         let n_chunks = 1usize << p3_batch_stark::symbolic::get_log_num_quotient_chunks_for_domain::<F, EF, _, _>(air, layout, <_ as Pcs<EF, record::Recording>>::natural_domain_for_degree(pcs, 1 << log_n), &lookups[i], 0, &LogUpGadget::new());
@@ -179,6 +186,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
             base,
             ext,
             periodic: air.periodic_columns().iter().map(|c| c.iter().map(|v| v.as_canonical_u32()).collect()).collect(),
+            public_lane: if let ss_rap_p3::state::LaneAirs::Public(a) = air { Some(a.lane as usize) } else { None },
             bus,
         });
     }
@@ -198,6 +206,10 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
     // seeds
     let first_digest = ops.iter().position(|o| matches!(o, Op::ObserveDigest(_))).unwrap();
     let seed = observes(&ops[..first_digest]);
+    // between the main and preprocessed commitments: the public values, instance by instance
+    let second_digest = first_digest + 1 + ops[first_digest + 1..].iter().position(|o| matches!(o, Op::ObserveDigest(_))).unwrap();
+    let public_values: Vec<(usize, usize)> = airs.iter().enumerate().filter(|(_, a)| a.num_public_values() > 0).map(|(i, a)| (i, a.num_public_values())).collect();
+    assert_eq!(observes(&ops[first_digest + 1..second_digest]).len(), public_values.iter().map(|x| x.1).sum::<usize>(), "public values are observed as plain scalars");
     let sample_pos: Vec<usize> = ops.iter().enumerate().filter(|(_, o)| matches!(o, Op::Sample(_))).map(|(k, _)| k).collect();
     let after_zeta = sample_pos[15] + 1; // la, lb, alpha, zeta
     let pcs_alpha = sample_pos[16];
@@ -208,7 +220,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
     let fri_digest = after_alpha + ops[after_alpha..].iter().position(|o| matches!(o, Op::ObserveDigest(_))).unwrap();
     let fri_seed = observes(&ops[after_alpha..fri_digest]);
     let fri = FriShape { batches, log_blowup: p.log_blowup, queries: p.queries, pcs_seed, fri_seed };
-    BatchShape { inst, lookup_width, seed, pre_commit, pre_instances, fri }
+    BatchShape { inst, public_values, lookup_width, seed, pre_commit, pre_instances, fri }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -335,7 +347,86 @@ fn alloc_vec(cs: &ConstraintSystemRef<Fr>, n: usize, w: Option<&Vec<[u32; 4]>>) 
 }
 
 /// Enforces that the witness is a valid Plonky3 batch proof of `shape`'s statement.
-pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Option<&BatchWitness>) -> R<()> {
+/// The statement side of the verifier: the public values of each instance listed in
+/// `BatchShape::public_values` (canonical BabyBear values, in order) and the periodic columns of
+/// every instance (empty for instances without them), as circuit values.
+pub struct PublicIo {
+    pub public_values: Vec<Vec<FpVar<Fr>>>,
+    pub periodic: Vec<Vec<Vec<M31>>>,
+}
+
+impl PublicIo {
+    /// The statement as circuit constants (from `st`, natively).
+    pub fn constant(shape: &BatchShape, st: &StateStatement) -> Self {
+        let limbs = ss_rap_p3::state::digest_limbs(st);
+        Self {
+            public_values: shape.public_values.iter().map(|_| limbs.iter().map(|&v| FpVar::Constant(Fr::from(v as u64))).collect()).collect(),
+            periodic: shape.inst.iter().map(|s| s.periodic.iter().map(|c| c.iter().map(|&v| M31::constant(v, 0)).collect()).collect()).collect(),
+        }
+    }
+}
+
+fn is_const_zero(m: &M31) -> bool {
+    use ark_ff::Zero;
+    matches!(&m.v, FpVar::Constant(c) if c.is_zero())
+}
+
+type Weights = std::collections::HashMap<(usize, usize), (Vec<E4>, E4)>;
+
+/// Periodic columns (one period of p = 2^log_p values, as circuit values) at zeta, by the
+/// barycentric formula P(w) = (w^p - 1)/p * sum_i v_i g^i/(w - g^i), w = zeta^(n/p). The
+/// inverses 1/(w - g^i) depend on (log_n, log_p) only and are shared through `cache`.
+fn periodic_var(ctx: &mut CircuitCtx, cache: &mut Weights, cols: &[Vec<M31>], zeta: &E4, log_n: usize) -> R<Vec<E4>> {
+    if cols.is_empty() {
+        return Ok(vec![]);
+    }
+    let p = cols[0].len();
+    assert!(cols.iter().all(|c| c.len() == p) && p.is_power_of_two());
+    let log_p = p.trailing_zeros() as usize;
+    let g = TWO_ADIC_GENERATORS[log_p];
+    if !cache.contains_key(&(log_n, log_p)) {
+        let mut w = zeta.clone();
+        for _ in log_p..log_n {
+            w = ctx.mul(&w, &w)?;
+        }
+        let mut wp = w.clone();
+        for _ in 0..log_p {
+            wp = ctx.mul(&wp, &wp)?;
+        }
+        let one = ctx.base(1);
+        let num = ctx.sub(&wp, &one)?;
+        let factor = ctx.scale(&num, pow_u32(p as u32, (super::challenger_var::P - 2) as u64))?;
+        let mut invs = Vec::with_capacity(p);
+        let mut gi = 1u32;
+        for _ in 0..p {
+            let c = ctx.base(gi);
+            let d = ctx.sub(&w, &c)?;
+            invs.push(ctx.inv(&d)?);
+            gi = ((gi as u64 * g as u64) % super::challenger_var::P) as u32;
+        }
+        cache.insert((log_n, log_p), (invs, factor));
+    }
+    let (invs, factor) = cache.get(&(log_n, log_p)).unwrap().clone();
+    let mut out = Vec::with_capacity(cols.len());
+    for col in cols {
+        let mut acc = e4_const([0; 4]);
+        let mut gi = 1u32;
+        for (v, inv) in col.iter().zip(&invs) {
+            if !is_const_zero(v) {
+                acc = acc.add(&inv.mul_base(&v.mul_const(gi)));
+            }
+            gi = ((gi as u64 * g as u64) % super::challenger_var::P) as u32;
+        }
+        out.push(ctx.mul(&acc, &factor)?);
+    }
+    Ok(out)
+}
+
+/// The commitments of the proof as circuit values: main, permutation, quotient, then the FRI
+/// commit-phase commitments (what `v_umt_root` binds).
+pub struct ProofCommits(pub Vec<FpVar<Fr>>);
+
+pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Option<&BatchWitness>, io: &PublicIo) -> R<ProofCommits> {
     let fr = |x: Option<Fr>| FpVar::new_witness(cs.clone(), || x.ok_or(ark_relations::r1cs::SynthesisError::AssignmentMissing));
     let main = fr(w.map(|w| w.main))?;
     let perm = fr(w.map(|w| w.perm))?;
@@ -357,12 +448,27 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
     }
     let fri = FriProofVar::witness(cs, &shape.fri, w.map(|w| &w.fri))?;
 
+    let stage = |name: &str, n0: &mut usize| {
+        if std::env::var("P3_STAGES").is_ok() {
+            eprintln!("  {name:28} {:>10} constraints", cs.num_constraints() - *n0);
+        }
+        *n0 = cs.num_constraints();
+    };
+    let mut n0 = 0usize;
+    stage("witness allocation", &mut n0);
     // 1. transcript
     let mut ch = ChallengerVar::new(cs.clone());
     for &v in &shape.seed {
         ch.observe(&FpVar::Constant(Fr::from(v as u64)))?;
     }
     ch.observe_digest(&main)?;
+    assert_eq!(io.public_values.len(), shape.public_values.len());
+    for (vals, &(_, n)) in io.public_values.iter().zip(&shape.public_values) {
+        assert_eq!(vals.len(), n);
+        for v in vals {
+            ch.observe(v)?;
+        }
+    }
     ch.observe_digest(&pre)?;
     let la = sample_e4(&mut ch)?;
     let lb = sample_e4(&mut ch)?;
@@ -376,6 +482,7 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
     ch.observe_digest(&quot)?;
     let zeta = sample_e4(&mut ch)?;
 
+    stage("transcript (before PCS)", &mut n0);
     // 2. opening argument
     let mut ctx = CircuitCtx { cs: cs.clone() };
     let nexts: Vec<E4> = shape.inst.iter().map(|s| ctx.scale(&zeta, TWO_ADIC_GENERATORS[s.log_n]).and_then(|x| x.reduce(cs))).collect::<R<_>>()?;
@@ -411,6 +518,7 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
             vals[3].push(vec![iv[i].perm_local.clone(), iv[i].perm_next.clone()]);
         }
     }
+    let bound_commits = ProofCommits([vec![main.clone(), perm.clone(), quot.clone()], fri.commit_phase_commits.clone()].concat());
     let mut commits = vec![main, quot, pre, perm];
     if pts[3].is_empty() {
         pts.pop();
@@ -418,6 +526,7 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         commits.pop();
     }
     verify_pcs(cs, &mut ch, &shape.fri, &commits, &pts, &vals, &fri)?;
+    stage("opening argument (PCS/FRI)", &mut n0);
 
     // 3. constraints at zeta
     let mut gamma = lb.clone();
@@ -431,10 +540,13 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         acc = ctx.add(&acc, &gamma)?.reduce(cs)?;
         prefix.push(acc.clone());
     }
+    let mut cache = Weights::new();
     for (i, s) in shape.inst.iter().enumerate() {
         let v = &iv[i];
         let [first, last, trans, inv_van] = selectors(&mut ctx, &zeta, s.log_n)?;
-        let periodic = periodic_at(&mut ctx, &s.periodic, &zeta, s.log_n)?;
+        assert_eq!(io.periodic[i].len(), s.periodic.len());
+        assert!(io.periodic[i].iter().zip(&s.periodic).all(|(a, b)| a.len() == b.len()), "periodic columns of another shape");
+        let periodic = periodic_var(&mut ctx, &mut cache, &io.periodic[i], &zeta, s.log_n)?;
         let rec = |ctx: &mut CircuitCtx, flat: &[E4]| flat.chunks(4).map(|c| recompose(ctx, c)).collect::<R<Vec<_>>>();
         let pt = Point {
             main_local: v.main_local.clone(),
@@ -478,6 +590,7 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         lhs.sub(&quotient).assert_zero(cs)?;
     }
 
+    stage("constraints at zeta", &mut n0);
     // 4. terminals sum to zero
     let mut sum = e4_const([0; 4]);
     for v in &iv {
@@ -486,9 +599,8 @@ pub fn verify_batch_var(cs: &ConstraintSystemRef<Fr>, shape: &BatchShape, w: Opt
         }
     }
     sum.assert_zero(cs)?;
-    let _ = M31::constant(0, 0);
     let _ = BigUint::from(0u32);
-    Ok(())
+    Ok(bound_commits)
 }
 
 #[cfg(test)]
@@ -505,26 +617,26 @@ mod tests {
         assert!(ok);
         let shape = batch_shape(&st, &p, &proof.degree_bits, &ops);
         let w = batch_witness(&shape, &proof, &ops);
-        let run = |shape: &BatchShape, w: &BatchWitness| {
+        let run = |io_st: &StateStatement, w: &BatchWitness| {
             let cs = ConstraintSystem::<Fr>::new_ref();
-            verify_batch_var(&cs, shape, Some(w)).unwrap();
+            let io = PublicIo::constant(&batch_shape(io_st, &p, &proof.degree_bits, &ops), io_st);
+            verify_batch_var(&cs, &shape, Some(w), &io).unwrap();
             (cs.is_satisfied().unwrap(), cs.num_constraints())
         };
-        let (ok, n) = run(&shape, &w);
+        let (ok, n) = run(&st, &w);
         assert!(ok, "honest proof");
         eprintln!("Plonky3 batch verifier, 600 transfers, 5 lanes x 2^8 rows, blowup 2 x 20 queries: {n} constraints");
-        // another statement (a different transfer amount in lane 0): the periodic columns change
+        // another statement (a different transfer amount in lane 0): periodic columns and digest change
         let mut st2 = st.clone();
         st2.lanes[0][3].amount += 1;
-        let shape2 = batch_shape(&st2, &p, &proof.degree_bits, &ops);
-        assert!(!run(&shape2, &w).0, "proof of another statement");
+        assert!(!run(&st2, &w).0, "proof of another statement");
         // a forged opened value
         let mut bw = w.clone();
         bw.inst[0].main_local[7][0] = (bw.inst[0].main_local[7][0] + 1) % 2013265921;
-        assert!(!run(&shape, &bw).0, "forged opening");
+        assert!(!run(&st, &bw).0, "forged opening");
         // a forged terminal
         let mut bw = w.clone();
         bw.inst[2].terminal.as_mut().unwrap()[1] ^= 1;
-        assert!(!run(&shape, &bw).0, "forged terminal");
+        assert!(!run(&st, &bw).0, "forged terminal");
     }
 }

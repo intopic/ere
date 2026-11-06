@@ -27,4 +27,5 @@ pub mod challenger_var;
 pub mod p3fri_var;
 pub mod p3air_eval;
 pub mod p3batch_var;
+pub mod p3settle;
 
