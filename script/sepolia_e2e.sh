@@ -21,15 +21,30 @@ cp "$out/E2EVerifier.sol" contracts/E2EVerifier.sol
 source "$out/e2e.env"
 
 send=(--rpc-url "$SEPOLIA_RPC_URL" --private-key "$SEPOLIA_PRIVATE_KEY")
+# a load-balanced RPC can answer from a node that has not seen the new block yet
+wait_code() {
+  for _ in $(seq 1 30); do
+    [ "$(cast code "$1" --rpc-url "$SEPOLIA_RPC_URL")" != "0x" ] && return 0
+    sleep 4
+  done
+  echo "no code at $1 after 120 s"; return 1
+}
 verifier=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json | jq -r .deployedTo)
 echo "verifier $verifier"
+wait_code "$verifier"
 settlement=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifierV2 "${send[@]}" --broadcast --json \
   --constructor-args "$OLD_ROOT" "$me" "$verifier" | jq -r .deployedTo)
 echo "settlement $settlement"
+wait_code "$settlement"
 
 # the proof must verify on-chain before the blob transaction is paid for
-cast call "$verifier" "verifyProof(uint256[2],uint256[2][2],uint256[2],uint256)(bool)" \
-  "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL" | grep -qx true
+ok=$(cast call "$verifier" "verifyProof(uint256[2],uint256[2][2],uint256[2],uint256)(bool)" \
+  "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL")
+echo "verifyProof on-chain: $ok"
+[ "$ok" = "true" ] || { echo "the proof does not verify on-chain"; exit 1; }
+onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,bytes32,uint256)(uint256)" \
+  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BLOB_HASH" "$BATCH" --rpc-url "$SEPOLIA_RPC_URL")
+echo "public input on-chain: $onchain (prover: $PUBLIC_INPUT)"
 
 # the batch itself: calldata plus the blob the contract reads with blobhash(0)
 tx=$(cast send "$settlement" \

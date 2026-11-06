@@ -18,7 +18,9 @@ jobs:
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
           SEPOLIA_PRIVATE_KEY: ${{ secrets.SEPOLIA_PRIVATE_KEY }}
-        run: script/sepolia_e2e.sh | tee sepolia.txt
+        run: |
+          set -o pipefail
+          script/sepolia_e2e.sh 2>&1 | tee sepolia.txt
       - name: Summary
         if: always()
         run: |
