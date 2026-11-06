@@ -6,7 +6,7 @@ use crate::bn254::{self, Challenger, Perm, ValMmcs};
 use p3_baby_bear::BabyBear;
 use p3_bn254::Bn254;
 use p3_challenger::{CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger};
-use p3_field::{BasedVectorSpace, PrimeField32};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::MerkleCap;
 use std::sync::{Arc, Mutex};
 
@@ -98,13 +98,15 @@ impl FieldChallenger<F> for Recording {}
 
 impl GrindingChallenger for Recording {
     type Witness = F;
-    /// Finds the witness with the inner challenger, then replays `check_witness` through the
-    /// recording methods so the log holds Observe(witness), SampleBits(bits, 0).
+    /// Finds the SMALLEST passing witness (sequential search: the inner challenger's parallel
+    /// grind returns whichever thread wins, so the proof would depend on the core count), then
+    /// replays `check_witness` through the recording methods so the log holds
+    /// Observe(witness), SampleBits(bits, 0).
     fn grind(&mut self, bits: usize) -> F {
         if bits == 0 {
             return F::default();
         }
-        let w = self.inner.clone().grind(bits);
+        let w = (0u32..).map(F::from_u32).find(|&w| self.inner.clone().check_witness(bits, w)).unwrap();
         self.observe(w);
         assert_eq!(self.sample_bits(bits), 0);
         w
