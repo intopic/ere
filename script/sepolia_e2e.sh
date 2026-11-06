@@ -32,11 +32,18 @@ wait_code() {
   done
   echo "no code at $1 after 120 s"; return 1
 }
-dv=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json)
+deploy_nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
+dv=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json --nonce "$deploy_nonce")
 verifier=$(jq -r .deployedTo <<<"$dv")
 echo "verifier $verifier"
 wait_code "$verifier"
+# a load-balanced RPC can still report the old nonce right after the first deploy
+for _ in $(seq 1 30); do
+  [ "$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")" -gt "$((deploy_nonce))" ] && break
+  sleep 4
+done
 ds=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifierV2 "${send[@]}" --broadcast --json \
+  --nonce "$((deploy_nonce + 1))" \
   --constructor-args "$OLD_ROOT" "$me" "$verifier")
 settlement=$(jq -r .deployedTo <<<"$ds")
 echo "settlement $settlement"
