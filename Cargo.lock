@@ -1244,6 +1244,8 @@ dependencies = [
  "p3-field",
  "p3-matrix",
  "p3-symmetric",
+ "p3-uni-stark",
+ "p3-util",
  "rand_chacha",
  "ss_rap_p3",
  "ss_rap_v2",
