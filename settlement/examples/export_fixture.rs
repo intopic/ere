@@ -9,7 +9,7 @@
 use ss_rap_settlement::fees::{CostModel, FeeSchedule, TxKind};
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
 use ss_rap_settlement::pipeline::{settle, PipelineConfig};
-use ss_rap_settlement::sequencer::{Sequencer, Tx};
+use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::Path;
 use std::time::Duration;
 
@@ -24,7 +24,8 @@ fn main() {
     let cost = CostModel::default();
 
     // ---- sequencer: 100 accounts, PDF mix (~52.6% transfers, ~47.4% swaps)
-    let accounts: Vec<[u8; 20]> = (0..100u8).map(|i| [i; 20]).collect();
+    let keys: Vec<_> = (0..100u64).map(dev_key).collect();
+    let accounts: Vec<[u8; 20]> = keys.iter().map(|k| address_of(k.verifying_key())).collect();
     let genesis: Vec<([u8; 20], u64)> = accounts.iter().map(|a| (*a, 1_000_000_000)).collect();
     let mut seq = Sequencer::new(&genesis, txs, schedule);
     seq.cost_per_tx_micro_usd = cost.cost_per_tx_micro_usd(txs);
@@ -35,7 +36,7 @@ fn main() {
         let to = (k * 7 + 3) % accounts.len();
         let to = if to == from { (to + 1) % accounts.len() } else { to };
         let kind = if (k * 1000 / txs) < 526 { TxKind::Transfer } else { TxKind::Swap };
-        let tx = Tx { from: accounts[from], to: accounts[to], amount: 1 + (k as u64 * 7919) % 10_000, nonce: nonces[from], kind };
+        let tx = Tx::signed(&keys[from], accounts[to], 1 + (k as u64 * 7919) % 10_000, nonces[from], kind, seq.chain_id);
         nonces[from] += 1;
         latencies.push(seq.submit(tx).expect("valid tx").latency);
     }

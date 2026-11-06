@@ -391,7 +391,7 @@ pub fn verify_pcs<'s, 'e: 's>(
     };
     let bits_h: Vec<Vec<H>> = indices.iter().map(|bs| bs.iter().map(|b| hbool(cs, b)).collect::<Result<_, _>>()).collect::<Result<_, _>>()?;
     tick(0, &mut tally);
-    let groups = if par.is_inline() { 1 } else { query_groups() };
+    let groups = if par.is_inline() { 1 } else { QUERY_GROUPS };
     let per = shape.queries.div_ceil(groups.max(1));
     let ctx = std::sync::Arc::new(ctx);
     for g in 0..shape.queries.div_ceil(per.max(1)) {
@@ -460,10 +460,9 @@ impl QueryCtxH {
     }
 }
 
-/// Number of query groups when synthesising in parallel (P3_QUERY_GROUPS, default 4).
-fn query_groups() -> usize {
-    std::env::var("P3_QUERY_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
-}
+/// Number of query groups when synthesising in parallel. A constant, not a setting: the
+/// grouping changes the merged constraint system, so the proving key fixes it.
+pub const QUERY_GROUPS: usize = 4;
 
 /// One FRI query: input Merkle openings, reduced openings, folding to the final polynomial.
 fn check_query(cs: &ConstraintSystemRef<Fr>, shape: &FriShape, c: &QueryCtx, qv: &QueryVar, bits: &[Boolean<Fr>]) -> Result<(), SynthesisError> {

@@ -10,7 +10,7 @@
 use ss_rap_settlement::fees::{CostModel, FeeSchedule, TxKind};
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
 use ss_rap_settlement::pipeline::{batch_shape, settle_with, PipelineConfig, Wrapper};
-use ss_rap_settlement::sequencer::{Sequencer, Tx};
+use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::Path;
 use std::time::Instant;
 
@@ -22,11 +22,13 @@ fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let schedule = FeeSchedule::default();
     let cost = CostModel::default();
-    let genesis: Vec<([u8; 20], u64)> = (1..=6u8).map(|i| ([i; 20], 1_000_000)).collect();
+    let addr = |i: u64| address_of(dev_key(i).verifying_key());
+    let genesis: Vec<([u8; 20], u64)> = (1..=6u64).map(|i| (addr(i), 1_000_000)).collect();
     let mut seq = Sequencer::new(&genesis, 16, schedule);
     for k in 0..12u64 {
-        let from = (k % 6) as u8 + 1;
-        let tx = Tx { from: [from; 20], to: [(from % 6) + 1; 20], amount: 10 + k, nonce: (k / 6) as u32, kind: if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap } };
+        let from = k % 6 + 1;
+        let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
+        let tx = Tx::signed(&dev_key(from), addr((from % 6) + 1), 10 + k, (k / 6) as u32, kind, seq.chain_id);
         seq.submit(tx).expect("valid tx");
     }
     let batch = seq.seal();
