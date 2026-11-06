@@ -52,31 +52,51 @@ verify_gas=$(cast estimate "$verifier" "verifyProof(uint256[2],uint256[2][2],uin
   "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL")
 echo "verifyProof alone: $verify_gas gas (incl. 21000 base)"
 
-# the batch itself: calldata plus OUR blob (the one the proof binds), read with blobhash(0)
-calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
-  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C")
-gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
-blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
-nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
-tx=$(python3 script/send_blob_tx.py "$out/blob.bin" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
-  $((gas * 2 + 2000000000)) 2000000000 $((blobfee * 2 + 1000000000)))
-[ -n "$tx" ] || { echo "the blob transaction was not accepted"; exit 1; }
-cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" >/dev/null  # waits for inclusion
-echo "batch transaction $tx"
-cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq '{status,blockNumber,gasUsed,blobGasUsed,blobGasPrice}'
+# each batch: calldata plus OUR blob (the one the proof binds), read with blobhash(0)
+settle_batch() {  # <env file> <blob file>; sets tx
+  # shellcheck disable=SC1090
+  source "$1"
+  calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
+    "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C")
+  gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
+  blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
+  nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL" --block pending)
+  tx=$(python3 script/send_blob_tx.py "$2" "$BLOB_HASH" "$settlement" "$calldata" "$chain" "$nonce" \
+    $((gas * 2 + 2000000000)) 2000000000 $((blobfee * 2 + 1000000000)))
+  [ -n "$tx" ] || { echo "the blob transaction was not accepted"; exit 1; }
+  cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" >/dev/null  # waits for inclusion
+  echo "batch $BATCH transaction $tx"
+  cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq -c '{status,blockNumber,gasUsed,blobGasUsed,blobGasPrice}'
+  for _ in $(seq 1 30); do  # a load-balanced RPC may still answer from an older block
+    root=$(cast call "$settlement" "latestStateRoot()(bytes32)" --rpc-url "$SEPOLIA_RPC_URL")
+    [ "$root" = "$NEW_ROOT" ] && break
+    sleep 4
+  done
+  [ "$root" = "$NEW_ROOT" ] || { echo "state root is $root, expected $NEW_ROOT"; exit 1; }
+  echo "settled: batch $(cast call "$settlement" "latestBatchNumber()(uint256)" --rpc-url "$SEPOLIA_RPC_URL"), state root $root"
+  echo "explorer: https://sepolia.etherscan.io/tx/$tx"
+}
+gas_of() { cast receipt "$1" gasUsed --rpc-url "$SEPOLIA_RPC_URL" | awk '{print $1}'; }
 
-root=$(cast call "$settlement" "latestStateRoot()(bytes32)" --rpc-url "$SEPOLIA_RPC_URL")
-[ "$root" = "$NEW_ROOT" ] || { echo "state root is $root, expected $NEW_ROOT"; exit 1; }
-echo "settled: batch $(cast call "$settlement" "latestBatchNumber()(uint256)" --rpc-url "$SEPOLIA_RPC_URL"), state root $root"
-echo "explorer: https://sepolia.etherscan.io/tx/$tx"
+settle_batch "$out/e2e.env" "$out/blob.bin"
+tx1=$tx
+settle_batch "$out/e2e2.env" "$out/blob2.bin"
+tx2=$tx
+
+# replaying batch 2 must fail: the contract only takes the next batch on top of its root
+if replay=$(cast estimate "$settlement" "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
+  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C" --from "$me" --rpc-url "$SEPOLIA_RPC_URL" 2>&1); then
+  echo "REPLAY OF BATCH 2 WAS ACCEPTED"; exit 1
+fi
+echo "replay of batch 2 rejected (as it must be): $(grep -o '0x[0-9a-f]\{8\}\|InvalidBatchSequence\|revert[^,]*' <<<"$replay" | head -1)"
 
 # what the same transactions would cost on mainnet, at the fees of the last ~1024 mainnet blocks
-gas_of() { cast receipt "$1" gasUsed --rpc-url "$SEPOLIA_RPC_URL" | awk '{print $1}'; }
 deploy_verifier_gas=$(gas_of "$(jq -r .transactionHash <<<"$dv")")
 deploy_settlement_gas=$(gas_of "$(jq -r .transactionHash <<<"$ds")")
-settle_gas=$(gas_of "$tx")
-blob_gas=$(cast to-dec "$(cast receipt "$tx" --rpc-url "$SEPOLIA_RPC_URL" --json | jq -r .blobGasUsed)")
-echo "gas: deploy verifier $deploy_verifier_gas, deploy settlement $deploy_settlement_gas, settle $settle_gas, blob gas $blob_gas"
+settle_gas=$(gas_of "$tx1")
+settle2_gas=$(gas_of "$tx2")
+blob_gas=$(cast to-dec "$(cast receipt "$tx2" --rpc-url "$SEPOLIA_RPC_URL" --json | jq -r .blobGasUsed)")
+echo "gas: deploy verifier $deploy_verifier_gas, deploy settlement $deploy_settlement_gas, batch 1 $settle_gas, batch 2 $settle2_gas, blob gas $blob_gas per batch"
 echo "code size: verifier $(( ($(cast code "$verifier" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes, settlement $(( ($(cast code "$settlement" --rpc-url "$SEPOLIA_RPC_URL" | wc -c) - 3) / 2 )) bytes"
-python3 script/mainnet_cost.py "$deploy_verifier_gas" "$deploy_settlement_gas" "$settle_gas" "$blob_gas" "$TXS" \
+python3 script/mainnet_cost.py "$deploy_verifier_gas" "$deploy_settlement_gas" "$settle_gas" "$blob_gas" "$TXS" "$settle2_gas" \
   || echo "(mainnet fee estimate unavailable)"

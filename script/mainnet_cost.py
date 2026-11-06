@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What the gas measured on the testnet would cost on Ethereum mainnet.
 
-usage: mainnet_cost.py <deploy verifier gas> <deploy settlement gas> <settle gas> <blob gas> <txs in batch>
+usage: mainnet_cost.py <deploy verifier gas> <deploy settlement gas> <first batch gas> <blob gas> <txs in batch> [later batch gas]
 
 Reads the fees of the last 1024 mainnet blocks (eth_feeHistory) from MAINNET_RPC_URL (default: a
 public node) and the ETH price from CoinGecko (or ETH_USD), then prints the cost of deploying,
@@ -16,8 +16,6 @@ UA = {"content-type": "application/json", "user-agent": "ere-mainnet-cost/1.0"}
 RPC = os.environ.get("MAINNET_RPC_URL") or "https://ethereum-rpc.publicnode.com"
 TX_BYTES = 118  # one signed L2 transaction in the blob
 BLOB_TXS = (4096 * 31 - 4) // TX_BYTES  # transactions that fit in one blob
-# the first batch writes latestBatchNumber from zero (22100 gas); every later batch rewrites it (5000)
-FIRST_BATCH_EXTRA = 22100 - 5000
 
 
 def rpc(method, params):
@@ -62,8 +60,8 @@ def main():
         e = (gas * gwei + bgas * blob_gwei) / 1e9
         return f"{e:.6f} ETH" + (f" (${e * usd:,.2f})" if usd else "")
 
-    steady = settle - FIRST_BATCH_EXTRA
-    print(f"\nmeasured gas: deploy verifier {dv}, deploy settlement {ds}, first batch {settle} (+ {blob_gas} blob gas), later batches ~{steady}")
+    steady = int(sys.argv[6]) if len(sys.argv) > 6 else settle  # measured on batch 2
+    print(f"\nmeasured gas: deploy verifier {dv}, deploy settlement {ds}, first batch {settle} (+ {blob_gas} blob gas), later batches {steady}")
     med, tipm = pct(base, 50) / 1e9, pct(tip, 50) / 1e9
     scenarios = (
         ("today's median", med + tipm, max(pct(blob, 50), 1) / 1e9),
