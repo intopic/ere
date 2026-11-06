@@ -29,7 +29,7 @@ pub type ValMmcs<F> = MerkleTreeMmcs<F, Bn254, Hash<F>, Compress, 2, 1>;
 pub type Challenge<F> = BinomialExtensionField<F, 4>;
 type ChallengeMmcs<F> = ExtensionMmcs<F, Challenge<F>, ValMmcs<F>>;
 pub type Challenger<F> = MultiField32Challenger<F, Bn254, Perm, 3, 2>;
-type Pcs<F> = TwoAdicFriPcs<F, Radix2DitParallel<F>, ValMmcs<F>, ChallengeMmcs<F>>;
+pub type Pcs<F> = TwoAdicFriPcs<F, Radix2DitParallel<F>, ValMmcs<F>, ChallengeMmcs<F>>;
 pub type Config<F> = StarkConfig<Pcs<F>, Challenge<F>, Challenger<F>>;
 
 /// BN254 scalar field modulus r.

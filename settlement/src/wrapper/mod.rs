@@ -23,4 +23,5 @@ pub mod settle_circuit;
 pub mod statement_var;
 pub mod hash_var;
 pub mod poseidon2_var;
+pub mod challenger_var;
 

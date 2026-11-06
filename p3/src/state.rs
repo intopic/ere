@@ -408,6 +408,26 @@ backend!(keccak, crate::config);
 backend!(poseidon2_bn254, crate::bn254);
 pub use keccak::{prove, verify, StateProof};
 
+
+/// Test helper: a statement with `n_tx` transfers over 10 accounts.
+#[doc(hidden)]
+pub fn tests_case(n_tx: u32, log_rows: u32) -> (StateStatement, [Vec<Vec<u32>>; 5]) {
+    use ss_rap_v2::state::{build, AccountState, Transfer};
+        let k = 10usize;
+        let addrs: Vec<[u8; 20]> = (0..k).map(|i| [i as u8 + 1; 20]).collect();
+        let old: Vec<AccountState> = (0..k).map(|i| AccountState { balance: 1_000_000 + i as u64, nonce: 0 }).collect();
+        let mut nonces = vec![0u32; k];
+        let txs: Vec<Transfer> = (0..n_tx)
+            .map(|j| {
+                let from = (j * 3 + 1) % k as u32;
+                let tx = Transfer { from, to: (j * 7 + 2) % k as u32, amount: 5 + j as u64, nonce: nonces[from as usize] };
+                nonces[from as usize] += 1;
+                tx
+            })
+            .collect();
+        build(&addrs, &old, &txs, log_rows, true).unwrap()
+    }
+
 #[cfg(test)]
 mod tests {
     use super::keccak::verify_lane;

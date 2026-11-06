@@ -5,3 +5,4 @@ pub mod bn254;
 pub mod config;
 pub mod mulmod;
 pub mod state;
+pub mod record;
