@@ -45,7 +45,7 @@ if got.lower() != want.lower():
 raw = "0x" + signed.raw_transaction.hex().removeprefix("0x")
 # Some RPC providers cap the request body (a tx with 5 blobs is ~1.3 MB of hex): try the
 # configured RPC first, then the public ones in BLOB_RPC_URLS. The tx is signed, so any node can relay it.
-urls = [os.environ["SEPOLIA_RPC_URL"]] + [u for u in os.environ.get("BLOB_RPC_URLS", "https://ethereum-sepolia-rpc.publicnode.com,https://sepolia.drpc.org").split(",") if u]
+urls = [os.environ["SEPOLIA_RPC_URL"]] + [u for u in os.environ.get("BLOB_RPC_URLS", "https://sepolia.gateway.tenderly.co,https://1rpc.io/sepolia,https://eth-sepolia.public.blastapi.io,https://rpc.sepolia.org,https://rpc2.sepolia.org,https://ethereum-sepolia.blockpi.network/v1/rpc/public,https://sepolia.drpc.org").split(",") if u]
 body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw]}).encode()
 errors = []
 for i, url in enumerate(urls):
