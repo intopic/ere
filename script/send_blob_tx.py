@@ -43,15 +43,30 @@ got = "0x" + (hashes[0] if len(hashes) == 1 else keccak(b"".join(hashes))).hex()
 if got.lower() != want.lower():
     sys.exit(f"blob hash {got} is not the proven {want}")
 raw = "0x" + signed.raw_transaction.hex().removeprefix("0x")
-req = urllib.request.Request(
-    os.environ["SEPOLIA_RPC_URL"],
-    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw]}).encode(),
-    headers={"content-type": "application/json", "user-agent": "ere-sepolia-e2e/1.0"},
-)
-try:
-    reply = json.load(urllib.request.urlopen(req, timeout=60))
-except urllib.error.HTTPError as e:
-    sys.exit(f"eth_sendRawTransaction: HTTP {e.code}: {e.read()[:500]!r}")
-if "error" in reply:
-    sys.exit(f"eth_sendRawTransaction: {reply['error']}")
-print(reply["result"])
+# Some RPC providers cap the request body (a tx with 5 blobs is ~1.3 MB of hex): try the
+# configured RPC first, then the public ones in BLOB_RPC_URLS. The tx is signed, so any node can relay it.
+urls = [os.environ["SEPOLIA_RPC_URL"]] + [u for u in os.environ.get("BLOB_RPC_URLS", "https://ethereum-sepolia-rpc.publicnode.com,https://sepolia.drpc.org").split(",") if u]
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw]}).encode()
+errors = []
+for i, url in enumerate(urls):
+    name = "SEPOLIA_RPC_URL" if i == 0 else url  # never print the configured (secret) URL
+    req = urllib.request.Request(url, data=body, headers={"content-type": "application/json", "user-agent": "ere-sepolia-e2e/1.0"})
+    try:
+        reply = json.load(urllib.request.urlopen(req, timeout=120))
+    except urllib.error.HTTPError as e:
+        errors.append(f"{name}: HTTP {e.code}: {e.read()[:300]!r}")
+        continue
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        errors.append(f"{name}: {e}")
+        continue
+    if "error" in reply:
+        if "already known" in str(reply["error"]).lower():
+            print("0x" + bytes(signed.hash).hex().removeprefix("0x"))
+            sys.exit(0)
+        errors.append(f"{name}: {reply['error']}")
+        continue
+    if i > 0:
+        print(f"sent through {name}", file=sys.stderr)
+    print(reply["result"])
+    sys.exit(0)
+sys.exit("eth_sendRawTransaction failed on every RPC:\n  " + "\n  ".join(errors))
