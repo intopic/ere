@@ -4,7 +4,7 @@
 
 use ss_rap_settlement::fees::{CostModel, FeeSchedule, TxKind};
 use ss_rap_settlement::groth16;
-use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, PipelineError, Wrapper};
+use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, PipelineError, Profile, Wrapper};
 use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 
 fn addr(i: u64) -> [u8; 20] {
@@ -22,7 +22,9 @@ fn small_batch_through_the_plonky3_circuit() {
     }
     let batch = seq.seal();
     let p = P3Params { log_rows: 4, log_blowup: 1, queries: 1, budget: 3, query_pow: 4 };
-    let prover = P3Prover::new(&batch, p).unwrap();
+    // a production prover refuses these CI parameters (5 conjectured bits)
+    assert!(matches!(P3Prover::new(&batch, p, Profile::Production), Err(PipelineError::InsecureParams { bits: 5 })));
+    let prover = P3Prover::new(&batch, p, Profile::Development).unwrap();
     let (pk, vk) = prover.dev_keys();
     let mut rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(1);
     let mut rng: rand_chacha::ChaCha20Rng = rng;

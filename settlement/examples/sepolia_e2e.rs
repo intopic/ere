@@ -14,7 +14,7 @@
 use ss_rap_settlement::blob;
 use ss_rap_settlement::fees::{CostModel, FeeSchedule, TxKind};
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
-use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, Wrapper};
+use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, Profile, Wrapper};
 use ss_rap_settlement::public_input::{parse_address, Domain};
 use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::PathBuf;
@@ -57,7 +57,10 @@ fn main() {
 
     let t0 = Instant::now();
     let p = P3Params { log_rows, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
-    let prover = P3Prover::new(&batch, p).expect("shape");
+    // testnet: small FRI parameters (12 conjectured bits), explicitly a development profile;
+    // E2E_PRODUCTION=1 uses the production profile (100 bits) instead
+    let (p, profile) = if std::env::var("E2E_PRODUCTION").is_ok_and(|v| v == "1") { (P3Params::production(log_rows), Profile::Production) } else { (p, Profile::Development) };
+    let prover = P3Prover::new(&batch, p, profile).expect("shape");
     // DEV keys (public seed): testnet only
     let (pk, vk) = prover.dev_keys();
     let t_setup = t0.elapsed();

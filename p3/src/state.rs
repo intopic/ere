@@ -352,6 +352,31 @@ pub struct Params {
     pub query_pow: usize,
 }
 
+/// Conjectured security floor of a production profile (audit H-02): the FRI part of the
+/// soundness, `log_blowup * queries + query_pow` bits under the usual proximity-gap
+/// conjecture. This is not a whole-system proof: the quartic BabyBear challenge field
+/// (|K| ~ 2^123.6), the lookup argument, Fiat-Shamir over Poseidon2-BN254 and the outer
+/// Groth16 each need their own analysis (docs/SIGURIA.md).
+pub const MIN_PRODUCTION_BITS: usize = 100;
+
+impl Params {
+    /// The production profile for traces of 2^`log_rows` rows: blowup 8, 28 queries, 16 bits
+    /// of query grinding = 3 * 28 + 16 = 100 conjectured bits.
+    pub const fn production(log_rows: usize) -> Self {
+        Self { log_rows, log_blowup: 3, queries: 28, budget: 3, query_pow: 16 }
+    }
+
+    /// Conjectured FRI security bits: log_blowup * queries + query_pow.
+    pub const fn conjectured_bits(&self) -> usize {
+        self.log_blowup * self.queries + self.query_pow
+    }
+
+    /// Whether this profile may secure real funds (`MIN_PRODUCTION_BITS` or more).
+    pub const fn is_production(&self) -> bool {
+        self.conjectured_bits() >= MIN_PRODUCTION_BITS
+    }
+}
+
 fn degrees(st: &StateStatement, lane: usize, p: &Params) -> Vec<usize> {
     vec![p.log_rows, 8, PublicAir::<crate::config::BabyBear>::new(st, lane).log_rows]
 }
@@ -491,6 +516,20 @@ mod tests {
     }
 
     const P: Params = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
+
+    #[test]
+    fn production_profile_meets_the_floor_and_proves() {
+        let prod = Params::production(6);
+        assert_eq!(prod.conjectured_bits(), 100);
+        assert!(prod.is_production());
+        // the CI / testnet profiles are below it
+        assert!(!P.is_production());
+        assert!(!Params { log_rows: 5, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 }.is_production());
+        // blowup 8 works with the AIRs' constraint degrees: the batch proof verifies
+        let (st, traces) = case(200, 6);
+        let proof = poseidon2_bn254::prove_one(&st, &traces, &prod);
+        assert!(poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &prod));
+    }
 
     #[test]
     fn state_lanes_verify_and_forged_statements_do_not() {

@@ -92,8 +92,18 @@ pub use crate::wrapper::settle_circuit::v_umt_root;
 
 /// The Plonky3 settlement circuit of one batch shape, ready to prove: the shape and its R1CS
 /// matrices are built once; per batch only the witness is computed (on several threads).
+/// Which FRI parameters a prover accepts (audit H-02).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// At least `ss_rap_p3::state::MIN_PRODUCTION_BITS` conjectured bits; refuses anything less.
+    Production,
+    /// Any parameters: tests, CI fixtures and testnets. Never for real funds.
+    Development,
+}
+
 pub struct P3Prover {
     pub shape: P3SettleShape,
+    pub profile: Profile,
     pub matrices: ConstraintMatrices<Fr>,
     degree_bits: Vec<usize>,
 }
@@ -102,12 +112,16 @@ impl P3Prover {
     /// The shape of `batch` proven with `params`, and the matrices of its circuit. No key: the
     /// caller loads the proving and verifying keys made for these matrices, or asks explicitly
     /// for the development ones (`dev_keys`).
-    pub fn new(batch: &SealedBatch, params: P3Params) -> Result<Self, PipelineError> {
+    /// `Profile::Production` refuses parameters below the security floor.
+    pub fn new(batch: &SealedBatch, params: P3Params, profile: Profile) -> Result<Self, PipelineError> {
+        if profile == Profile::Production && !params.is_production() {
+            return Err(PipelineError::InsecureParams { bits: params.conjectured_bits() });
+        }
         let (st, traces) = state::build(&batch.addrs, &batch.old_states, &batch.transfers(), params.log_rows as u32, true).map_err(PipelineError::InvalidBatch)?;
         let (proof, ops) = p3settle::prove(&st, &traces, &params);
         let shape = P3SettleShape::new(&st, &params, &proof, &ops);
         let matrices = p3settle::synthesize_parallel(&shape, None, None, None, true).map_err(|_| PipelineError::ShapeMismatch)?.matrices;
-        Ok(Self { shape, matrices, degree_bits: proof.degree_bits.clone() })
+        Ok(Self { shape, profile, matrices, degree_bits: proof.degree_bits.clone() })
     }
 
     /// DEVELOPMENT keys for this shape: Groth16 setup from a PUBLIC seed, so anyone can forge
@@ -140,6 +154,8 @@ pub enum PipelineError {
     ShapeMismatch,
     /// The batch's transactions do not fit in one blob.
     BlobTooLarge,
+    /// FRI parameters below the production floor for a `Profile::Production` prover.
+    InsecureParams { bits: usize },
 }
 
 /// The statement shape and STARK parameters of a batch (what a settlement circuit key fixes).
