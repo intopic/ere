@@ -40,11 +40,33 @@ dhe nënshkrimet e transaksioneve mbulojnë `TX_DOMAIN || chain id || adresa e k
 - `P3Prover::new` nuk krijon çelësa; `P3Prover::dev_keys()` është setup-i me seed publik (vetëm teste/testnet).
 - Rastësia e Groth16 vjen nga thirrësi (`RngCore + CryptoRng`): `OsRng` në prodhim, ChaCha me seed vetëm për fixture.
 
+## H-01: dizajni i lidhjes së blob-it (në punë)
+
+Përmbajtja e blob-it arrin në EVM vetëm përmes precompile-it 0x0a: për një pikë `z` ai vërteton
+`p_blob(z) = y`, ku `p_blob` është polinomi mbi fushën e BLS12-381 që blob-i mban në formë
+vlerësimesh (rrënjët e njësisë në rend bit-reversed). Lidhja që ndërtojmë:
+
+1. **Referenca native** (`settlement/src/blob_eval.rs`, gati): `p_blob(z)` nga bajtet e blob-it me
+   formulën baricentrike të EIP-4844, e testuar kundrejt c-kzg, dhe hyrja 192-bajtëshe e 0x0a.
+2. **Angazhimi i elementeve:** STARK-u mban elementet e blob-it si bajte dhe i thith në një
+   sponge Poseidon2-BabyBear; digest-i `D` del si vlerë publike (O(1) për Groth16).
+3. **Pika:** `z = H(D, versioned hashes) mod r_bls`, e llogaritur në qarkun Groth16. Prover-i nuk
+   mund ta zgjedhë `z` para se të fiksojë elementet.
+4. **Vlerësimi brenda STARK-ut:** me AIR-in MULMOD (moduli BLS12-381), për çdo element
+   `u_i·(z − w_i) ≡ e_i·w_i`, shuma `Σ u_i`, pastaj `y·4096 = Σ u_i·(z^4096 − 1)`. Rreth 2 rreshta
+   MULMOD për element, pra rreth 50k rreshta për 6 blob-e.
+5. **Lidhja me ekzekutimin:** një bus nga rreshtat e transaksioneve te bajtet e blob-it (pozicioni,
+   vlera), sipas formatit kanonik `Tx::encode`.
+6. **L1:** `z` dhe `y_j` hyjnë në hash-in e header-it; kontrata thërret 0x0a për çdo blob
+   (~50k gas për blob).
+
+Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet ≤ 4096/r_bls ≈ 2^-243.
+
 ## Ende hapur
 
 | Gjetja | Gjendja |
 |---|---|
-| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | hapur (hapi 3) |
+| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (pjesa 1/6 gati) |
 | C-02 ECDSA brenda provës | hapur (hapi 4) |
 | C-01 Ceremonia e çelësave | e shtyrë me vendim: bëhet pasi qarku të ngrihet |
 | M-01, M-02, M-05, M-06, I-01 | jo në rrugën e settlement-it; të paprekura |

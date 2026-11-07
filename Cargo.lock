@@ -1482,6 +1482,7 @@ dependencies = [
  "k256",
  "num-bigint 0.4.8",
  "num-bigint 0.5.1",
+ "num-traits",
  "p3-air",
  "p3-baby-bear",
  "p3-batch-stark",

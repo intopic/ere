@@ -7,6 +7,7 @@
 //! - `pipeline`: transactions -> batch -> STARK -> public input -> Groth16 -> L1 calldata.
 
 pub mod blob;
+pub mod blob_eval;
 pub mod fees;
 pub mod groth16;
 pub mod pipeline;
