@@ -8,7 +8,9 @@
 //! from the OS (`OsRng`). Writes to <out_dir>:
 //!   E2EVerifier.sol -- Groth16 verifier of this shape (DEV key, public seed: testnet only)
 //!   blob.bin, blob2.bin, ... -- the 131072-byte EIP-4844 blob of each batch (1, 2, ...)
-//!   e2e.env, e2e2.env, ...   -- roots, batch number, blob hash and the proof, for the L1 transaction
+//!   e2e.env, e2e2.env, ...   -- roots, batch number, blob hash, blob evaluation (point, values,
+//!                               KZG openings) and the proof, for the L1 transaction
+//!   slots.txt                -- the circuit's blob slots (the contract's constructor argument)
 //! Small shape and few FRI queries (fast, NOT the production parameters).
 
 use ss_rap_settlement::blob;
@@ -54,13 +56,17 @@ fn main() {
         seq.seal()
     };
     let batch = fill(&mut seq);
+    // blob slots of the shape: E2E_BLOB_SLOTS, or the first batch's blobs (rounded up)
+    let blob_slots: usize = std::env::var("E2E_BLOB_SLOTS").ok().map(|v| v.parse().expect("E2E_BLOB_SLOTS"))
+        .unwrap_or_else(|| blob::to_blobs(&batch.blob_data()).expect("blobs").len().next_power_of_two());
+    std::fs::write(out.join("slots.txt"), format!("{blob_slots}\n")).unwrap();
 
     let t0 = Instant::now();
     let p = P3Params { log_rows, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
     // testnet: small FRI parameters (12 conjectured bits), explicitly a development profile;
     // E2E_PRODUCTION=1 uses the production profile (100 bits) instead
     let (p, profile) = if std::env::var("E2E_PRODUCTION").is_ok_and(|v| v == "1") { (P3Params::production(log_rows), Profile::Production) } else { (p, Profile::Development) };
-    let prover = P3Prover::new(&batch, p, profile).expect("shape");
+    let prover = P3Prover::new(&batch, p, blob_slots, profile).expect("shape");
     // DEV keys (public seed): testnet only
     let (pk, vk) = prover.dev_keys();
     let t_setup = t0.elapsed();
@@ -91,7 +97,7 @@ fn main() {
         }
         let (a, b, c) = (g1_hex(&pkg.proof.a), g2_calldata(&pkg.proof.b), g1_hex(&pkg.proof.c));
         let env = format!(
-            "TXS={}\nBLOB_FILES={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
+            "TXS={}\nBLOB_FILES={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nBLOB_POINT={}\nBLOB_VALUES=[{}]\nBLOB_EVAL=({},[{}],{})\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
             batch.txs.len(),
             files.join(","),
             hex(&h.old_state_root),
@@ -99,6 +105,11 @@ fn main() {
             hex(&h.v_umt_root),
             h.batch_number,
             hex(&h.blob_versioned_hash),
+            hex(&h.blob_point),
+            h.blob_values.iter().map(|y| hex(y)).collect::<Vec<_>>().join(","),
+            hex(&h.blob_point),
+            h.blob_values.iter().map(|y| hex(y)).collect::<Vec<_>>().join(","),
+            hex(&pkg.blob_kzg),
             fr_hex(&pkg.public_input),
             a[0], a[1], b[0][0], b[0][1], b[1][0], b[1][1], c[0], c[1],
         );

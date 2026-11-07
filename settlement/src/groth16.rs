@@ -68,7 +68,7 @@ pub fn p3_dev_setup(shape: &crate::wrapper::p3settle::P3SettleShape) -> (Proving
 /// `p3_dev_setup` and the shape's matrices (kept by the prover: per batch only the witness is
 /// computed).
 pub fn p3_dev_setup_with_matrices(shape: &crate::wrapper::p3settle::P3SettleShape) -> ((ProvingKey<Bn254>, VerifyingKey<Bn254>), ark_relations::r1cs::ConstraintMatrices<Fr>) {
-    let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, true).expect("synthesis");
+    let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, None, true).expect("synthesis");
     (p3_dev_setup_from_matrices(&m.matrices), m.matrices)
 }
 

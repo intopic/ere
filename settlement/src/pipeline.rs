@@ -76,6 +76,9 @@ pub struct SettlementPackage {
     pub stark_rows: usize,
     pub timings: Timings,
     pub economics: BatchEconomics,
+    /// Per blob of the batch: its KZG commitment and opening proof at the header's blob point
+    /// (48 + 48 bytes), what the contract passes to the point-evaluation precompile.
+    pub blob_kzg: Vec<u8>,
 }
 
 /// The blob hash of `data` (the batch's `blob_data`): the versioned hash of its blob, or, when it
@@ -112,15 +115,20 @@ impl P3Prover {
     /// The shape of `batch` proven with `params`, and the matrices of its circuit. No key: the
     /// caller loads the proving and verifying keys made for these matrices, or asks explicitly
     /// for the development ones (`dev_keys`).
-    /// `Profile::Production` refuses parameters below the security floor.
-    pub fn new(batch: &SealedBatch, params: P3Params, profile: Profile) -> Result<Self, PipelineError> {
+    /// `Profile::Production` refuses parameters below the security floor. `blob_slots` (a power
+    /// of two) is the most blobs a batch of this shape may take.
+    pub fn new(batch: &SealedBatch, params: P3Params, blob_slots: usize, profile: Profile) -> Result<Self, PipelineError> {
         if profile == Profile::Production && !params.is_production() {
             return Err(PipelineError::InsecureParams { bits: params.conjectured_bits() });
         }
+        if !blob_slots.is_power_of_two() {
+            return Err(PipelineError::ShapeMismatch);
+        }
         let (st, traces) = state::build(&batch.addrs, &batch.old_states, &batch.transfers(), params.log_rows as u32, true).map_err(PipelineError::InvalidBatch)?;
-        let (proof, ops) = p3settle::prove(&st, &traces, &params);
+        let (blobs, _) = batch_blobs(batch, blob_slots)?;
+        let (proof, ops, _) = p3settle::prove(&st, &traces, &blobs, &params);
         let shape = P3SettleShape::new(&st, &params, &proof, &ops);
-        let matrices = p3settle::synthesize_parallel(&shape, None, None, None, true).map_err(|_| PipelineError::ShapeMismatch)?.matrices;
+        let matrices = p3settle::synthesize_parallel(&shape, None, None, None, None, true).map_err(|_| PipelineError::ShapeMismatch)?.matrices;
         Ok(Self { shape, profile, matrices, degree_bits: proof.degree_bits.clone() })
     }
 
@@ -197,6 +205,8 @@ pub fn settle_with(
         return Err(PipelineError::StarkRejected);
     }
 
+    let (blobs, _) = batch_blobs(batch, crate::wrapper::settle_circuit::UNCHECKED_BLOB_SLOTS)?;
+    let unchecked = blobs.claim();
     let header = BatchHeader {
         old_state_root: batch.old_state_root,
         new_state_root: batch.new_state_root,
@@ -205,6 +215,10 @@ pub fn settle_with(
         batch_number: batch.batch_number,
         chain_id: cfg.domain.chain_id,
         settlement: cfg.domain.settlement,
+        // filled natively: these circuits do not check the blob contents (audit H-01: only the
+        // P3 path proves them), the contract does check them against the blob
+        blob_point: crate::blob_eval::be32(&unchecked.z),
+        blob_values: crate::wrapper::blob_var::blob_values(&unchecked),
     };
     let x = header.public_input();
     let t0 = Instant::now();
@@ -228,6 +242,7 @@ pub fn settle_with(
     timings.groth16_verify = t0.elapsed();
 
     let measured = CostModel { prover_seconds: timings.stark_prove.as_secs_f64() + timings.groth16_prove.as_secs_f64(), ..*cost };
+    let blob_kzg = batch_kzg(batch, &header.blob_point)?;
     Ok(SettlementPackage {
         header,
         public_input: x,
@@ -236,7 +251,24 @@ pub fn settle_with(
         stark_rows: 1 << params.log_rows,
         timings,
         economics: batch_economics(&batch.kinds(), schedule, &measured),
+        blob_kzg,
     })
+}
+
+/// The batch's blobs as the STARK's blob input (in `slots` slots), and their blobs hash.
+pub fn batch_blobs(batch: &SealedBatch, slots: usize) -> Result<(ss_rap_p3::blob_eval::BlobInput, [u8; 32]), PipelineError> {
+    let blobs = crate::blob::to_blobs(&batch.blob_data()).ok_or(PipelineError::BlobTooLarge)?;
+    p3settle::blob_input(&blobs, slots).ok_or(PipelineError::BlobTooLarge)
+}
+
+/// The KZG commitment and opening proof at `z` of each of the batch's blobs.
+pub fn batch_kzg(batch: &SealedBatch, z: &[u8; 32]) -> Result<Vec<u8>, PipelineError> {
+    let blobs = crate::blob::to_blobs(&batch.blob_data()).ok_or(PipelineError::BlobTooLarge)?;
+    let mut v = Vec::with_capacity(96 * blobs.len());
+    for b in &blobs {
+        v.extend_from_slice(&crate::blob_eval::point_evaluation_input(b, z).ok_or(PipelineError::BlobTooLarge)?[96..]);
+    }
+    Ok(v)
 }
 
 /// The batch through the Plonky3 batch-STARK and the Plonky3 settlement circuit.
@@ -261,24 +293,18 @@ fn settle_p3(
         return Err(PipelineError::ShapeMismatch);
     }
     // proves and verifies natively (panics if the native verifier rejects)
-    let (proof, ops) = p3settle::prove(&st, &traces, &p);
+    let (blobs, blobs_hash) = batch_blobs(batch, prover.shape.blob_slots())?;
+    let (proof, ops, claim) = p3settle::prove(&st, &traces, &blobs, &p);
     timings.stark_prove = t0.elapsed();
     if proof.degree_bits != prover.degree_bits {
         return Err(PipelineError::ShapeMismatch);
     }
     let w = p3settle::witness(&prover.shape, &proof, &ops);
-    let header = BatchHeader {
-        old_state_root: batch.old_state_root,
-        new_state_root: batch.new_state_root,
-        v_umt_root: p3settle::v_umt_root(&st, &w),
-        blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
-        batch_number: batch.batch_number,
-        chain_id: cfg.domain.chain_id,
-        settlement: cfg.domain.settlement,
-    };
+    let header = p3settle::header(&st, &w, &claim, blobs_hash, batch.batch_number, &cfg.domain);
+    debug_assert_eq!(header.blob_versioned_hash, blob_versioned_hash(&batch.blob_data())?);
     let x = header.public_input();
     let t0 = Instant::now();
-    let z = p3settle::witness_parallel(&prover.shape, &st, &w, &header).map_err(|_| PipelineError::Groth16Rejected)?;
+    let z = p3settle::witness_parallel(&prover.shape, &st, &w, &claim, &header).map_err(|_| PipelineError::Groth16Rejected)?;
     let proof_g = groth16::p3_prove_with(pk, &prover.matrices, &z, rng);
     timings.groth16_prove = t0.elapsed();
     let t0 = Instant::now();
@@ -287,6 +313,7 @@ fn settle_p3(
     }
     timings.groth16_verify = t0.elapsed();
     let measured = CostModel { prover_seconds: timings.stark_prove.as_secs_f64() + timings.groth16_prove.as_secs_f64(), ..*cost };
+    let blob_kzg = batch_kzg(batch, &header.blob_point)?;
     Ok(SettlementPackage {
         header,
         public_input: x,
@@ -294,6 +321,7 @@ fn settle_p3(
         // not measured for the Plonky3 proof (it never leaves the prover: L1 sees only Groth16)
         stark_proof_bytes: 0,
         stark_rows: 5 << p.log_rows,
+        blob_kzg,
         timings,
         economics: batch_economics(&batch.kinds(), schedule, &measured),
     })

@@ -29,10 +29,10 @@ contract StarkWrapperVerifier is IGroth16Verifier {
     uint256 internal constant DELTA_X2 = 0x297ba2700a621808d0201d7444fa622f60565d095a48f9c67302a7676fcb5e04;
     uint256 internal constant DELTA_Y1 = 0x282f30f576f3c15e99f8c4f43bba56a8e37c5461106026002cac73c6020b3ded;
     uint256 internal constant DELTA_Y2 = 0x1e81a1261877454e848619476795c3ba9c2eb6b936b9efb601de35e45678691b;
-    uint256 internal constant IC0_X = 0x2a7f7612046ecac898f301d72668b13bc36598d63b621b23b79c12f85ad0365d;
-    uint256 internal constant IC0_Y = 0x21271314478077a5fb9eacdfe3d37c6325bb13ccd6e40e4b4b3959960bd43dbd;
-    uint256 internal constant IC1_X = 0x1f2dbb57a231c4e482a4d9fdb00cdd09fc0ad2bdb6b448d8eea13c37692f4585;
-    uint256 internal constant IC1_Y = 0x04b79ac4746f6745b3fbeb5257881523ed9a02056ee9aa9b729403c9ce012f0a;
+    uint256 internal constant IC0_X = 0x2931dfebe5efcff4df3a68f0d5600dab8e2fe3dddc2fb457848e58c1e0fbc3cc;
+    uint256 internal constant IC0_Y = 0x209e0b4994578ec41376441ea111293f5ad0872d78166d8f23bcedb66f551100;
+    uint256 internal constant IC1_X = 0x164271e82f2ef7e1cdc1a4bf5e4a48f798a31e73ffe6eee132de133189befd19;
+    uint256 internal constant IC1_Y = 0x1b1ed5161938ab58b9a1176aa9adec11ba1881cfda28552c0a0af1a714448902;
 
     /// @inheritdoc IGroth16Verifier
     function verifyProof(

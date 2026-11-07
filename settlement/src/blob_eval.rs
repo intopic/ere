@@ -117,6 +117,20 @@ pub fn point_evaluation_input(blob: &[u8], z: &[u8; 32]) -> Option<Vec<u8>> {
     Some(v)
 }
 
+/// Solidity members of a fixture library for the blob evaluation of header `h` (audit H-01):
+/// BLOB_POINT, KZG (commitment || proof per blob) and blobValues().
+pub fn solidity_fixture(h: &crate::public_input::BatchHeader, kzg: &[u8]) -> String {
+    let hx = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut s = format!("    bytes32 internal constant BLOB_POINT = 0x{};\n", hx(&h.blob_point));
+    s += &format!("    bytes internal constant KZG = hex\"{}\";\n\n", hx(kzg));
+    s += &format!("    function blobValues() internal pure returns (bytes32[] memory v) {{\n        v = new bytes32[]({});\n", h.blob_values.len());
+    for (j, y) in h.blob_values.iter().enumerate() {
+        s += &format!("        v[{j}] = 0x{};\n", hx(y));
+    }
+    s += "    }\n";
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,8 +167,9 @@ mod tests {
         let blob = crate::blob::to_blob(&data).unwrap();
         let z = BigUint::from_bytes_be(&crate::public_input::keccak256(b"z")) % modulus();
         let e = ss_rap_p3::blob_eval::elements(&blob).unwrap();
-        let (_, s, _) = ss_rap_p3::blob_eval::trace::<p3_baby_bear::BabyBear>(&e, &z);
-        let y = ss_rap_p3::blob_eval::value_from_sum(&s, &z);
+        let (_, s, _) = ss_rap_p3::blob_eval::trace::<p3_baby_bear::BabyBear>(&[e], 1, &z);
+        let s = &s[0];
+        let y = ss_rap_p3::blob_eval::value_from_sum(s, &z);
         assert_eq!(be32(&y), kzg_y(&blob, &be32(&z)));
     }
 

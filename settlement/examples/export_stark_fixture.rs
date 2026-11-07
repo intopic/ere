@@ -73,7 +73,7 @@ library StarkSettlementFixture {{
     uint256 internal constant CHAIN_ID = {chain};
     address internal constant SETTLEMENT = {settlement};
     uint256 internal constant PUBLIC_INPUT = {x};
-
+{blob_eval}
     function a() internal pure returns (uint256[2] memory p) {{
         p = [uint256({a0}), uint256({a1})];
     }}
@@ -97,6 +97,7 @@ library StarkSettlementFixture {{
         vumt = hex(&h.v_umt_root),
         blob = hex(&h.blob_versioned_hash),
         x = fr_hex(&pkg.public_input),
+        blob_eval = ss_rap_settlement::blob_eval::solidity_fixture(h, &pkg.blob_kzg),
         a0 = a[0], a1 = a[1],
         b00 = b[0][0], b01 = b[0][1], b10 = b[1][0], b11 = b[1][1],
         c0 = c[0], c1 = c[1],

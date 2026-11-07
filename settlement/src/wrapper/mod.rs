@@ -28,5 +28,7 @@ pub mod p3fri_var;
 pub mod p3air_eval;
 pub mod p3batch_var;
 pub mod p3settle;
+#[allow(unexpected_cfgs)] // the MontConfig derive tests an `asm` feature
+pub mod blob_var;
 pub mod par;
 

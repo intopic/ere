@@ -15,9 +15,9 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
 use ss_rap_p3::state::Params;
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
-use ss_rap_settlement::public_input::{BatchHeader, FORGE_SETTLEMENT};
+use ss_rap_settlement::public_input::Domain;
 use ss_rap_settlement::wrapper::par::Merged;
-use ss_rap_settlement::wrapper::p3settle::{self, v_umt_root, P3SettleCircuit, P3SettleShape};
+use ss_rap_settlement::wrapper::p3settle::{self, P3SettleCircuit, P3SettleShape};
 use std::path::Path;
 use std::time::Instant;
 
@@ -36,12 +36,19 @@ fn main() {
     let (st, traces) = ss_rap_p3::state::tests_case(n_tx as u32, log_rows as u32);
     let p = Params { log_rows, log_blowup, queries, budget: 3, query_pow };
 
+    // one real blob (made-up bytes: the transfers are not yet linked to the blob, audit H-01
+    // part 5) in one slot
+    let data: Vec<u8> = (0..4000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    let blob = ss_rap_settlement::blob::to_blob(&data).unwrap();
+    let (blobs, blobs_hash) = p3settle::blob_input(std::slice::from_ref(&blob), 1).unwrap();
+
     let t0 = Instant::now();
-    let (proof, ops) = p3settle::prove(&st, &traces, &p);
+    let (proof, ops, claim) = p3settle::prove(&st, &traces, &blobs, &p);
     let t_stark = t0.elapsed();
     let shape = P3SettleShape::new(&st, &p, &proof, &ops);
     let w = p3settle::witness(&shape, &proof, &ops);
-    let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [0x01; 32], batch_number: 1, chain_id: 31337, settlement: FORGE_SETTLEMENT };
+    let h = p3settle::header(&st, &w, &claim, blobs_hash, 1, &Domain::DEV);
+    let kzg = ss_rap_settlement::blob_eval::point_evaluation_input(&blob, &h.blob_point).unwrap()[96..].to_vec();
 
     let print_head = || {
         println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);
@@ -52,7 +59,7 @@ fn main() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         cs.set_mode(ark_relations::r1cs::SynthesisMode::Prove { construct_matrices: false });
         let t0 = Instant::now();
-        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
+        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), blobs: Some(&claim), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
         print_head();
         println!("  constraints                     : {} (satisfied: not checked)", cs.num_constraints());
         println!("  witness generation (1 thread)   : {:.1} s", t0.elapsed().as_secs_f64());
@@ -63,7 +70,7 @@ fn main() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         cs.set_optimization_goal(ark_relations::r1cs::OptimizationGoal::Constraints);
         let t0 = Instant::now();
-        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
+        P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), blobs: Some(&claim), header: Some(&h) }.generate_constraints(cs.clone()).unwrap();
         let t_gen = t0.elapsed();
         cs.finalize();
         let mx = cs.to_matrices().unwrap();
@@ -75,7 +82,7 @@ fn main() {
     // once per shape: the matrices (and, below, the Groth16 keys)
     let t0 = Instant::now();
     let (keys, mx) = if std::env::var("P3_SYNTH_ONLY").is_ok() {
-        (None, p3settle::synthesize_parallel(&shape, None, None, None, true).unwrap().matrices)
+        (None, p3settle::synthesize_parallel(&shape, None, None, None, None, true).unwrap().matrices)
     } else {
         let (k, mx) = groth16::p3_dev_setup_with_matrices(&shape);
         (Some(k), mx)
@@ -84,7 +91,7 @@ fn main() {
     // per batch: only the witness, on several threads (statement, instances at zeta, FRI query
     // groups), in the column order of those matrices
     let t0 = Instant::now();
-    let z = p3settle::witness_parallel(&shape, &st, &w, &h).unwrap();
+    let z = p3settle::witness_parallel(&shape, &st, &w, &claim, &h).unwrap();
     let t_synth = t0.elapsed();
     let m = Merged { matrices: mx, assignment: z };
     let t0 = Instant::now();
@@ -137,7 +144,7 @@ library P3SettlementFixture {{
     uint256 internal constant CHAIN_ID = {chain};
     address internal constant SETTLEMENT = {settlement};
     uint256 internal constant PUBLIC_INPUT = {x};
-
+{blob_eval}
     function a() internal pure returns (uint256[2] memory p) {{
         p = [uint256({a0}), uint256({a1})];
     }}
@@ -159,6 +166,7 @@ library P3SettlementFixture {{
         vumt = hex(&h.v_umt_root),
         blob = hex(&h.blob_versioned_hash),
         x = fr_hex(&x),
+        blob_eval = ss_rap_settlement::blob_eval::solidity_fixture(&h, &kzg),
         a0 = a[0], a1 = a[1],
         b00 = b[0][0], b01 = b[0][1], b10 = b[1][0], b11 = b[1][1],
         c0 = c[0], c1 = c[1],

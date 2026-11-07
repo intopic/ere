@@ -30,6 +30,8 @@ cp "$out/E2EVerifier.sol" contracts/E2EVerifier.sol
 source "$out/e2e.env"
 
 send=(--rpc-url "$SEPOLIA_RPC_URL" --private-key "$SEPOLIA_PRIVATE_KEY")
+# the settlement call: roots, batch, the blob evaluation (point, values, KZG openings: audit H-01), proof
+SETTLE_SIG="verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,(bytes32,bytes32[],bytes),uint256[2],uint256[2][2],uint256[2])"
 # a load-balanced RPC can answer from a node that has not seen the new block yet
 wait_code() {
   for _ in $(seq 1 30); do
@@ -51,7 +53,7 @@ for _ in $(seq 1 30); do
 done
 ds=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifierV2 "${send[@]}" --broadcast --json \
   --nonce "$((deploy_nonce + 1))" \
-  --constructor-args "$OLD_ROOT" "$me" "$verifier")
+  --constructor-args "$OLD_ROOT" "$me" "$verifier" "$(cat "$out/slots.txt")")
 settlement=$(jq -r .deployedTo <<<"$ds")
 echo "settlement $settlement"
 [ "$(cast to-check-sum-address "$settlement")" = "$(cast to-check-sum-address "$settlement_at")" ] \
@@ -63,8 +65,8 @@ ok=$(cast call "$verifier" "verifyProof(uint256[2],uint256[2][2],uint256[2],uint
   "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL")
 echo "verifyProof on-chain: $ok"
 [ "$ok" = "true" ] || { echo "the proof does not verify on-chain"; exit 1; }
-onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,bytes32,uint256)(uint256)" \
-  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BLOB_HASH" "$BATCH" --rpc-url "$SEPOLIA_RPC_URL")
+onchain=$(cast call "$settlement" "computePublicInput(bytes32,bytes32,bytes32,bytes32,uint256,bytes32,bytes32[])(uint256)" \
+  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BLOB_HASH" "$BATCH" "$BLOB_POINT" "$BLOB_VALUES" --rpc-url "$SEPOLIA_RPC_URL")
 echo "public input on-chain: $onchain (prover: $PUBLIC_INPUT)"
 verify_gas=$(cast estimate "$verifier" "verifyProof(uint256[2],uint256[2][2],uint256[2],uint256)" \
   "$PROOF_A" "$PROOF_B" "$PROOF_C" "$PUBLIC_INPUT" --rpc-url "$SEPOLIA_RPC_URL")
@@ -75,8 +77,8 @@ settle_batch() {  # <env file>; sets tx
   # shellcheck disable=SC1090
   source "$1"
   blob_paths=$(tr ',' '\n' <<<"$BLOB_FILES" | sed "s|^|$out/|" | paste -sd, -)
-  calldata=$(cast calldata "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
-    "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C")
+  calldata=$(cast calldata "$SETTLE_SIG" \
+    "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$BLOB_EVAL" "$PROOF_A" "$PROOF_B" "$PROOF_C")
   gas=$(cast gas-price --rpc-url "$SEPOLIA_RPC_URL")
   blobfee=$(cast to-dec "$(cast rpc eth_blobBaseFee --rpc-url "$SEPOLIA_RPC_URL" | tr -d '"')")
   nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL" --block pending)
@@ -108,8 +110,8 @@ tx1=${txs_all[0]}
 tx2=${txs_all[$((batches - 1))]}
 
 # replaying the last batch must fail: the contract only takes the next batch on top of its root
-if replay=$(cast estimate "$settlement" "verifyAndSettleBatchV2(bytes32,bytes32,bytes32,uint256,uint256[2],uint256[2][2],uint256[2])" \
-  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$PROOF_A" "$PROOF_B" "$PROOF_C" --from "$me" --rpc-url "$SEPOLIA_RPC_URL" 2>&1); then
+if replay=$(cast estimate "$settlement" "$SETTLE_SIG" \
+  "$OLD_ROOT" "$NEW_ROOT" "$VUMT_ROOT" "$BATCH" "$BLOB_EVAL" "$PROOF_A" "$PROOF_B" "$PROOF_C" --from "$me" --rpc-url "$SEPOLIA_RPC_URL" 2>&1); then
   echo "REPLAY OF THE LAST BATCH WAS ACCEPTED"; exit 1
 fi
 echo "replay of the last batch rejected (as it must be): $(grep -o '0x[0-9a-f]\{8\}\|InvalidBatchSequence\|revert[^,]*' <<<"$replay" | head -1)"

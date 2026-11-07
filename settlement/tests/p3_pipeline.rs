@@ -23,8 +23,8 @@ fn small_batch_through_the_plonky3_circuit() {
     let batch = seq.seal();
     let p = P3Params { log_rows: 4, log_blowup: 1, queries: 1, budget: 3, query_pow: 4 };
     // a production prover refuses these CI parameters (5 conjectured bits)
-    assert!(matches!(P3Prover::new(&batch, p, Profile::Production), Err(PipelineError::InsecureParams { bits: 5 })));
-    let prover = P3Prover::new(&batch, p, Profile::Development).unwrap();
+    assert!(matches!(P3Prover::new(&batch, p, 1, Profile::Production), Err(PipelineError::InsecureParams { bits: 5 })));
+    let prover = P3Prover::new(&batch, p, 1, Profile::Development).unwrap();
     let (pk, vk) = prover.dev_keys();
     let mut rng: rand_chacha::ChaCha20Rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(1);
     let cfg = PipelineConfig::default();

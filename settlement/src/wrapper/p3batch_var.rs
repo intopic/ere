@@ -69,11 +69,25 @@ impl Ctx for CircuitCtx {
     fn neg(&mut self, a: &E4) -> R<E4> {
         Ok(e4_const([0; 4]).sub(&self.tame(a, 200)?))
     }
+    /// Lazy: the product of two reduced values (about 66 bits) stays unreduced, so a sum of
+    /// products (the AIRs' integer convolutions) pays one reduction instead of one per product.
     fn mul(&mut self, a: &E4, b: &E4) -> R<E4> {
-        self.tame(a, 100)?.mul(&self.tame(b, 100)?).reduce(&self.cs)
+        let p = self.tame(a, 100)?.mul(&self.tame(b, 100)?);
+        if bits(&p) > 80 {
+            p.reduce(&self.cs)
+        } else {
+            Ok(p)
+        }
     }
+    /// a * c, as -(a * (m - c)) when m - c is the smaller one (Poseidon2's diagonal holds
+    /// constants like 2^-27 = -15), so the bound grows by the smaller constant.
     fn scale(&mut self, a: &E4, c: u32) -> R<E4> {
         let a = self.tame(a, 150)?;
+        let m = a.c[0].m();
+        if c > m / 2 {
+            let t = E4 { c: std::array::from_fn(|k| a.c[k].mul_const(m - c)) };
+            return Ok(e4_const([0; 4]).sub(&t));
+        }
         Ok(E4 { c: std::array::from_fn(|k| a.c[k].mul_const(c)) })
     }
     fn inv(&mut self, a: &E4) -> R<E4> {
@@ -88,6 +102,35 @@ impl Ctx for CircuitCtx {
     fn mul_x(&mut self, a: &E4) -> R<E4> {
         let a = self.tame(a, 150)?;
         Ok(E4 { c: [a.c[3].mul_const(11), a.c[0].clone(), a.c[1].clone(), a.c[2].clone()] })
+    }
+    fn mul_lazy(&mut self, a: &E4, b: &E4) -> R<E4> {
+        let (mut a, mut b) = (a.clone(), b.clone());
+        while bits(&a) + bits(&b) + 6 > 150 {
+            if bits(&a) >= bits(&b) {
+                a = a.reduce(&self.cs)?;
+            } else {
+                b = b.reduce(&self.cs)?;
+            }
+        }
+        Ok(a.mul(&b))
+    }
+    fn prep(&mut self, a: &E4) -> R<E4> {
+        self.tame(a, 40)
+    }
+    fn dot(&mut self, a: &[E4], b: &[E4]) -> R<E4> {
+        let mut acc: Option<E4> = None;
+        for (x, y) in a.iter().zip(b) {
+            let p = self.tame(x, 190)?.mul(&self.tame(y, 40)?);
+            acc = Some(match acc {
+                None => p,
+                Some(s) if bits(&s) > 225 => s.reduce(&self.cs)?.add(&p),
+                Some(s) => s.add(&p),
+            });
+        }
+        match acc {
+            None => Ok(e4_const([0; 4])),
+            Some(s) => s.reduce(&self.cs),
+        }
     }
 }
 
@@ -113,6 +156,8 @@ pub struct InstShape {
     pub periodic: Vec<Vec<u32>>,
     /// the lane of a public AIR (whose periodic columns come from the statement)
     pub public_lane: Option<usize>,
+    /// the blob AIR (whose public values are the blob claim)
+    pub blob: bool,
     pub bus: Vec<usize>,
 }
 
@@ -139,7 +184,9 @@ fn observes(ops: &[Op]) -> Vec<u32> {
 pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: &[Op]) -> BatchShape {
     let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
     let pcs = cfg.pcs();
-    let airs = all_airs::<F>(st);
+    let slots = 1usize << (degree_bits[degree_bits.len() - 1] - ss_rap_p3::blob_eval::LOG_ROWS);
+    let airs = all_airs::<F>(st, slots);
+    assert_eq!(airs.len(), degree_bits.len(), "a proof of another shape");
     let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, degree_bits, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     let lookups = &pd.common.lookups;
     // bus ids as lay_out_lookup_challenges
@@ -188,6 +235,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
             ext,
             periodic: air.periodic_columns().iter().map(|c| c.iter().map(|v| v.as_canonical_u32()).collect()).collect(),
             public_lane: if let ss_rap_p3::state::LaneAirs::Public(a) = air { Some(a.lane as usize) } else { None },
+            blob: matches!(air, ss_rap_p3::state::LaneAirs::Blob(_)),
             bus,
         });
     }
@@ -359,11 +407,12 @@ pub struct PublicIo {
 }
 
 impl PublicIo {
-    /// The statement as circuit constants (from `st`, natively).
-    pub fn constant(shape: &BatchShape, st: &StateStatement) -> Self {
+    /// The statement and the blob claim as circuit constants (natively).
+    pub fn constant(shape: &BatchShape, st: &StateStatement, blobs: &ss_rap_p3::blob_eval::BlobClaim) -> Self {
         let limbs = ss_rap_p3::state::digest_limbs(st);
+        let blob_pv: Vec<u32> = blobs.public_values::<F>().iter().map(|v| v.as_canonical_u32()).collect();
         Self {
-            public_values: shape.public_values.iter().map(|_| limbs.iter().map(|&v| FpVar::Constant(Fr::from(v as u64))).collect()).collect(),
+            public_values: shape.public_values.iter().map(|&(i, _)| if shape.inst[i].blob { &blob_pv } else { &limbs }.iter().map(|&v| FpVar::Constant(Fr::from(v as u64))).collect()).collect(),
             periodic: shape.inst.iter().map(|s| s.periodic.iter().map(|c| c.iter().map(|&v| M31::constant(v, 0)).collect()).collect()).collect(),
         }
     }
@@ -469,7 +518,7 @@ impl InstH {
 
 /// sum_k alpha^k C_k(zeta) / Z_H(zeta) equals the quotient recomposed from its chunks.
 #[allow(clippy::too_many_arguments)]
-fn check_instance(ctx: &mut CircuitCtx, s: &InstShape, v: &InstVars, zeta: &E4, alpha: &E4, lb: &E4, prefix: &[E4], periodic: Vec<E4>) -> R<()> {
+fn check_instance(ctx: &mut CircuitCtx, s: &InstShape, v: &InstVars, zeta: &E4, alpha: &E4, lb: &E4, prefix: &[E4], periodic: Vec<E4>, public: Vec<E4>) -> R<()> {
     let [first, last, trans, inv_van] = selectors(ctx, zeta, s.log_n)?;
     let rec = |ctx: &mut CircuitCtx, flat: &[E4]| flat.chunks(4).map(|c| recompose(ctx, c)).collect::<R<Vec<_>>>();
     let pt = Point {
@@ -482,6 +531,7 @@ fn check_instance(ctx: &mut CircuitCtx, s: &InstShape, v: &InstVars, zeta: &E4, 
         challenges: prefix.iter().flat_map(|p| [p.clone(), lb.clone()]).collect(),
         perm_values: v.terminal.iter().cloned().collect(),
         periodic,
+        public,
         is_first_row: first,
         is_last_row: last,
         is_transition: trans,
@@ -695,6 +745,11 @@ pub fn verify_batch_var<'s, 'e: 's>(cs: &ConstraintSystemRef<Fr>, shape: &'e Bat
             terminal: v.terminal.as_ref().map(|t| he4(cs, t)).transpose()?,
         };
         let cols: Vec<Vec<HM31>> = io.periodic[i].iter().map(|c| c.iter().map(|m| hm31(cs, m)).collect::<R<_>>()).collect::<R<_>>()?;
+        // public values (canonical BabyBear, below 2^31) as base-field values of the instance
+        let public_h: Vec<HM31> = match shape.public_values.iter().position(|&(j, _)| j == i) {
+            None => vec![],
+            Some(k) => io.public_values[k].iter().map(|v| hm31(cs, &M31 { v: v.clone(), bound: BigUint::from(1u64 << 31), ch: 0 })).collect::<R<_>>()?,
+        };
         let wts = if cols.is_empty() { None } else { weights.iter().find(|w| w.0 == (s.log_n, cols[0].len().trailing_zeros() as usize)).map(|w| (w.1.clone(), w.2.clone())) };
         let (zeta_h, alpha_h, lb_h) = (zeta_h.clone(), alpha_h.clone(), lb_h.clone());
         let prefix_i: Vec<HE4> = s.bus.iter().map(|&b| prefix_h[b].clone()).collect();
@@ -705,6 +760,8 @@ pub fn verify_batch_var<'s, 'e: 's>(cs: &ConstraintSystemRef<Fr>, shape: &'e Bat
             let prefix: Vec<E4> = prefix_i.iter().map(|x| io.import_e4(x)).collect::<R<_>>()?;
             let v = vh.import(io)?;
             let cols: Vec<Vec<M31>> = cols.iter().map(|c| c.iter().map(|m| io.import_m31(m)).collect::<R<_>>()).collect::<R<_>>()?;
+            let zero = M31::constant(0, 0);
+            let public: Vec<E4> = public_h.iter().map(|m| Ok(E4 { c: [io.import_m31(m)?, zero.clone(), zero.clone(), zero.clone()] })).collect::<R<_>>()?;
             let mut ctx = CircuitCtx { cs: io.cs.clone() };
             let periodic = match &wts {
                 None => vec![],
@@ -714,7 +771,7 @@ pub fn verify_batch_var<'s, 'e: 's>(cs: &ConstraintSystemRef<Fr>, shape: &'e Bat
                     periodic_sums(&mut ctx, &cols, &invs, &factor)?
                 }
             };
-            check_instance(&mut ctx, s, &v, &zeta, &alpha, &lb, &prefix, periodic)
+            check_instance(&mut ctx, s, &v, &zeta, &alpha, &lb, &prefix, periodic, public)
         })?;
     }
 
@@ -740,21 +797,24 @@ mod tests {
     fn verifies_the_five_lane_plonky3_proof_in_r1cs() {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
-        let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let proof = record::prove_one(&st, &traces, &p);
-        let (ok, ops) = record::verify_one(&st, &proof, &p);
+        let p = Params { log_rows: 8, log_blowup: 1, queries: 6, budget: 3, query_pow: 0 };
+        let blobs = ss_rap_p3::state::tests_blobs();
+        let claim = blobs.claim();
+        let proof = record::prove_one(&st, &traces, &blobs, &p);
+        let (ok, ops) = record::verify_one(&st, &proof, &claim, &p);
         assert!(ok);
         let shape = batch_shape(&st, &p, &proof.degree_bits, &ops);
         let w = batch_witness(&shape, &proof, &ops);
-        let run = |io_st: &StateStatement, w: &BatchWitness| {
+        let run_with = |io_st: &StateStatement, claim: &ss_rap_p3::blob_eval::BlobClaim, w: &BatchWitness| {
             let cs = ConstraintSystem::<Fr>::new_ref();
-            let io = PublicIo::constant(&batch_shape(io_st, &p, &proof.degree_bits, &ops), io_st);
+            let io = PublicIo::constant(&batch_shape(io_st, &p, &proof.degree_bits, &ops), io_st, claim);
             verify_batch_var(&cs, &shape, Some(w), &io, &super::super::par::Par::Inline(cs.clone())).unwrap();
             (cs.is_satisfied().unwrap(), cs.num_constraints())
         };
+        let run = |io_st: &StateStatement, w: &BatchWitness| run_with(io_st, &claim, w);
         let (ok, n) = run(&st, &w);
         assert!(ok, "honest proof");
-        eprintln!("Plonky3 batch verifier, 600 transfers, 5 lanes x 2^8 rows, blowup 2 x 20 queries: {n} constraints");
+        eprintln!("Plonky3 batch verifier, 600 transfers, 5 lanes x 2^8 rows, blowup 2 x 6 queries: {n} constraints");
         // another statement (a different balance in the table after lane 0): periodic columns and digest change
         let mut st2 = st.clone();
         st2.states[1][3].balance += 1;
@@ -771,5 +831,15 @@ mod tests {
         let mut bw = w.clone();
         bw.inst[2].terminal.as_mut().unwrap()[1] ^= 1;
         assert!(!run(&st, &bw).0, "forged terminal");
+        // another blob claim (sum, digest, point)
+        let mut c2 = claim.clone();
+        c2.s[0] += 1u32;
+        assert!(!run_with(&st, &c2, &w).0, "blob sum");
+        let mut c2 = claim.clone();
+        c2.d[0][5] ^= 1;
+        assert!(!run_with(&st, &c2, &w).0, "blob digest");
+        let mut c2 = claim.clone();
+        c2.z += 1u32;
+        assert!(!run_with(&st, &c2, &w).0, "blob point");
     }
 }

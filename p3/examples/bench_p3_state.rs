@@ -41,16 +41,18 @@ fn main() {
     // all 5 lanes in ONE proof (what the Groth16 circuit verifies), incl. the circuit-friendly 16 x 25
     for (lb, q) in [(log_blowup, queries), (2, 50), (3, 34), (4, 25)] {
         let p1 = Params { log_blowup: lb, queries: q, ..p };
+        let blobs = ss_rap_p3::state::tests_blobs();
+        let claim = blobs.claim();
         let t0 = Instant::now();
-        let pr = keccak::prove_one(&st, &traces, &p1);
+        let pr = keccak::prove_one(&st, &traces, &blobs, &p1);
         let pt = t0.elapsed();
-        let ok = keccak::verify_one(&st, &st.old_root(), &st.new_root(), &pr, &p1);
+        let ok = keccak::verify_one(&st, &st.old_root(), &st.new_root(), &pr, &claim, &p1);
         println!("  plonky3 ONE proof (keccak), blowup {} x {q}: prove {pt:>8.2?}  ok {ok}", 1 << lb);
         let t0 = Instant::now();
-        let pr = poseidon2_bn254::prove_one(&st, &traces, &p1);
+        let pr = poseidon2_bn254::prove_one(&st, &traces, &blobs, &p1);
         let pt = t0.elapsed();
         let t0 = Instant::now();
-        let ok = poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &pr, &p1);
+        let ok = poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &pr, &claim, &p1);
         println!("  plonky3 ONE proof (poseidon2-bn254), blowup {} x {q}: prove {pt:>8.2?}  verify {:>8.2?}  ok {ok}", 1 << lb, t0.elapsed());
     }
     for (name, mode) in [("ours, blake3", HashMode::Blake3), ("ours, poseidon-bn254", HashMode::Poseidon)] {

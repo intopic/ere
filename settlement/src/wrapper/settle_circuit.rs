@@ -57,7 +57,7 @@ pub struct SettleCircuit<'a> {
     pub header: Option<&'a BatchHeader>,
 }
 
-fn bits_of_bytes(cs: &ConstraintSystemRef<Fr>, bytes: Option<&[u8]>, n: usize) -> Result<Vec<Boolean<Fr>>, SynthesisError> {
+pub fn bits_of_bytes(cs: &ConstraintSystemRef<Fr>, bytes: Option<&[u8]>, n: usize) -> Result<Vec<Boolean<Fr>>, SynthesisError> {
     (0..8 * n).map(|i| Boolean::new_witness(cs.clone(), || bytes.map(|b| (b[i / 8] >> (i % 8)) & 1 == 1).ok_or(SynthesisError::AssignmentMissing))).collect()
 }
 
@@ -81,19 +81,50 @@ fn u256_be_bits(cs: &ConstraintSystemRef<Fr>, x: Option<u64>) -> Result<Vec<Bool
     Ok(out)
 }
 
-/// x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId, settlement) mod r, with the
-/// three roots given as circuit values and the other header fields as free witnesses.
-pub fn bind_header(cs: &ConstraintSystemRef<Fr>, x: &FpVar<Fr>, old_root: &FpVar<Fr>, new_root: &FpVar<Fr>, v_umt: &FpVar<Fr>, header: Option<&BatchHeader>) -> Result<(), SynthesisError> {
+/// Blob slots of the circuits that do not check the blobs (R8 and DEV): their headers carry z
+/// and one y as free witnesses.
+pub const UNCHECKED_BLOB_SLOTS: usize = 1;
+
+/// The header's blob fields as bits (bytes in order, LSB first): the blobs hash, then z and
+/// the y_j (`blob_var::blob_evals`, or free witnesses in a circuit that does not check them).
+pub struct HeaderBlobBits {
+    pub blobs_hash: Vec<Boolean<Fr>>,
+    pub evals: Vec<Boolean<Fr>>,
+}
+
+impl HeaderBlobBits {
+    /// The blobs hash as witness bits.
+    pub fn blobs_hash(cs: &ConstraintSystemRef<Fr>, header: Option<&BatchHeader>) -> Result<Vec<Boolean<Fr>>, SynthesisError> {
+        bits_of_bytes(cs, header.map(|h| h.blob_versioned_hash.as_slice()), 32)
+    }
+
+    /// Everything as free witnesses, with `slots` values y_j.
+    pub fn free(cs: &ConstraintSystemRef<Fr>, header: Option<&BatchHeader>, slots: usize) -> Result<Self, SynthesisError> {
+        let evals = header.map(|h| {
+            assert_eq!(h.blob_values.len(), slots, "header of another blob shape");
+            let mut v = h.blob_point.to_vec();
+            h.blob_values.iter().for_each(|y| v.extend_from_slice(y));
+            v
+        });
+        Ok(Self { blobs_hash: Self::blobs_hash(cs, header)?, evals: bits_of_bytes(cs, evals.as_deref(), 32 * (1 + slots))? })
+    }
+}
+
+/// x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId, settlement, z, y..) mod r,
+/// with the three roots and the blob fields given as circuit values and the other header fields
+/// as free witnesses.
+pub fn bind_header(cs: &ConstraintSystemRef<Fr>, x: &FpVar<Fr>, old_root: &FpVar<Fr>, new_root: &FpVar<Fr>, v_umt: &FpVar<Fr>, header: Option<&BatchHeader>, blob: &HeaderBlobBits) -> Result<(), SynthesisError> {
     let cs = cs.clone();
-    let mut msg = Vec::with_capacity(224 * 8);
+    let mut msg = Vec::with_capacity((224 + blob.evals.len() / 8) * 8);
     msg.extend(fr_bits(old_root)?);
     msg.extend(fr_bits(new_root)?);
     msg.extend(fr_bits(v_umt)?);
-    msg.extend(bits_of_bytes(&cs, header.map(|h| h.blob_versioned_hash.as_slice()), 32)?);
+    msg.extend(blob.blobs_hash.iter().cloned());
     msg.extend(u256_be_bits(&cs, header.map(|h| h.batch_number))?);
     msg.extend(u256_be_bits(&cs, header.map(|h| h.chain_id))?);
     let settlement = header.map(|h| crate::public_input::address_word(&h.settlement));
     msg.extend(bits_of_bytes(&cs, settlement.as_ref().map(|w| w.as_slice()), 32)?);
+    msg.extend(blob.evals.iter().cloned());
     let hash = keccak256(&msg)?;
     // big-endian uint256 mod r
     let mut acc = FpVar::zero();
@@ -121,7 +152,8 @@ impl ConstraintSynthesizer<Fr> for SettleCircuit<'_> {
         s.absorb(&v)?;
         let v_umt = s.squeeze_field_elements(1)?.remove(0);
 
-        bind_header(&cs, &x, &old_root, &new_root, &v_umt, self.header)?;
+        let blob = HeaderBlobBits::free(&cs, self.header, UNCHECKED_BLOB_SLOTS)?;
+        bind_header(&cs, &x, &old_root, &new_root, &v_umt, self.header, &blob)?;
         Ok(())
     }
 }
@@ -155,7 +187,7 @@ mod tests {
     }
 
     pub(crate) fn header(st: &StateStatement, proof: &StarkProof) -> BatchHeader {
-        BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(st, proof), blob_versioned_hash: [0x01; 32], batch_number: 7, chain_id: 31337, settlement: crate::public_input::FORGE_SETTLEMENT }
+        BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(st, proof), blob_versioned_hash: [0x01; 32], batch_number: 7, chain_id: 31337, settlement: crate::public_input::FORGE_SETTLEMENT, blob_point: [0; 32], blob_values: vec![[0; 32]; UNCHECKED_BLOB_SLOTS] }
     }
 
     fn sat(c: SettleCircuit) -> (bool, usize) {

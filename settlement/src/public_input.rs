@@ -3,8 +3,13 @@
 //! ```solidity
 //! uint256(keccak256(abi.encodePacked(oldStateRoot, newStateRoot, vUmtMerkleRoot,
 //!                                    blobsHash(), batchNumber, block.chainid,
-//!                                    uint256(uint160(address(this)))))) % R_MOD
+//!                                    uint256(uint160(address(this))), z, y_0, .., y_{k-1}))) % R_MOD
 //! ```
+//!
+//! z and y_j (audit H-01) are the point and the values of the blob polynomials the proof
+//! computed from the blob elements its trace holds; the contract checks each against the blob it
+//! carries with the point-evaluation precompile (y_j = 0 for a slot without a blob). k, the
+//! number of blob slots, is part of the circuit's shape.
 //!
 //! The settlement contract's own address is part of the statement (audit SET-06): a proof made
 //! for one deployment does not verify on another one, even on the same chain with the same key,
@@ -25,6 +30,10 @@ pub struct BatchHeader {
     pub chain_id: u64,
     /// Address of the settlement contract the batch is for (`address(this)` on L1).
     pub settlement: [u8; 20],
+    /// The point z at which the blobs are evaluated (big-endian).
+    pub blob_point: [u8; 32],
+    /// y_j = p_j(z) per blob slot (big-endian; 0 for a slot without a blob).
+    pub blob_values: Vec<[u8; 32]>,
 }
 
 /// Where a batch settles: the chain and the settlement contract. Binds both the batch public
@@ -134,9 +143,9 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
 }
 
 impl BatchHeader {
-    /// abi.encodePacked(bytes32 x 4, uint256 x 3): 224 bytes.
+    /// abi.encodePacked(bytes32 x 4, uint256 x 3, bytes32 z, bytes32[k] y): 256 + 32 k bytes.
     pub fn encode_packed(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(224);
+        let mut v = Vec::with_capacity(256 + 32 * self.blob_values.len());
         v.extend_from_slice(&self.old_state_root);
         v.extend_from_slice(&self.new_state_root);
         v.extend_from_slice(&self.v_umt_root);
@@ -144,6 +153,10 @@ impl BatchHeader {
         v.extend_from_slice(&u256_be(self.batch_number));
         v.extend_from_slice(&u256_be(self.chain_id));
         v.extend_from_slice(&address_word(&self.settlement));
+        v.extend_from_slice(&self.blob_point);
+        for y in &self.blob_values {
+            v.extend_from_slice(y);
+        }
         v
     }
 
@@ -185,13 +198,17 @@ mod tests {
             batch_number: 7,
             chain_id: 31337,
             settlement: [0xab; 20],
+            blob_point: [5; 32],
+            blob_values: vec![[6; 32], [7; 32]],
         };
         let e = h.encode_packed();
-        assert_eq!(e.len(), 224);
+        assert_eq!(e.len(), 320);
+        assert_eq!(&e[224..256], &[5; 32]);
+        assert_eq!(&e[288..], &[7; 32]);
         assert_eq!(e[159], 7);
         assert_eq!(&e[190..192], &31337u16.to_be_bytes());
         assert_eq!(&e[192..204], &[0u8; 12]);
-        assert_eq!(&e[204..], &[0xab; 20]);
+        assert_eq!(&e[204..224], &[0xab; 20]);
         // another settlement contract: another public input
         let other = BatchHeader { settlement: [0xac; 20], ..h.clone() };
         assert_ne!(other.public_input(), h.public_input());
