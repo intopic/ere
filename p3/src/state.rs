@@ -24,6 +24,8 @@
 //! `DIGEST_LIMBS` public values, the statement digest (`public_part().digest()`, Poseidon-BN254)
 //! in 30-bit limbs: Plonky3 observes public values right after the main commitment, before
 //! any challenge, and the verifier recomputes them from the statement it is given.
+use crate::blob_eval::{BlobClaim, BlobEvalAir, BlobInput, BytePairTableAir, PAIR_LOG_ROWS};
+use crate::tx_bind::{addr_rows, AddrAir, TxAir};
 use crate::mulmod::ByteTableAir;
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -37,6 +39,8 @@ use std::borrow::Cow;
 #[derive(Clone, Debug)]
 pub struct StateLaneAir {
     pub lane: u32,
+    /// receive every active row's transfer from `tx_bind::TxAir` on the "tx" bus (H-01 (b))
+    pub bind: bool,
 }
 
 impl<F> BaseAir<F> for StateLaneAir {
@@ -93,6 +97,12 @@ where
         builder.push_interaction("mem", mem(&tag, c[FROM_ID].clone(), c[NONCE].clone() + one.clone(), two_t.clone(), &c[FROM_NEW..FROM_NEW + 8]), w(-act.clone()));
         builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), c[TR2].clone(), &c[TO_OLD..TO_OLD + 8]), w(act.clone()));
         builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), two_t + one, &c[TO_NEW..TO_NEW + 8]), w(-act.clone()));
+        if self.bind {
+            let mut t = vec![tag.clone(), c[T].clone(), c[FROM_ID].clone(), c[TO_ID].clone()];
+            t.extend(c[AMT..AMT + 8].iter().cloned());
+            t.push(c[NONCE].clone());
+            builder.push_interaction("tx", t, w(-act.clone()));
+        }
     }
 }
 
@@ -111,10 +121,21 @@ pub fn digest_limbs(st: &StateStatement) -> Vec<u32> {
     (0..DIGEST_LIMBS).map(|k| (0..LIMB_BITS).map(|b| bit(k * LIMB_BITS + b) << b).sum()).collect()
 }
 
-/// The public values of every AIR in `airs` (the digest limbs where an AIR declares them).
+/// The public values of every AIR in `airs` (the digest limbs where a public AIR declares them).
 pub fn public_values<F: Field>(st: &StateStatement, airs: &[LaneAirs<F>]) -> Vec<Vec<F>> {
     let limbs: Vec<F> = digest_limbs(st).into_iter().map(F::from_u32).collect();
-    airs.iter().map(|a| if a.num_public_values() > 0 { limbs.clone() } else { vec![] }).collect()
+    airs.iter().map(|a| if matches!(a, LaneAirs::Public(_)) && a.num_public_values() > 0 { limbs.clone() } else { vec![] }).collect()
+}
+
+/// The public values of the single proof: the statement digest, and the blob claim.
+pub fn all_public_values<F: Field>(st: &StateStatement, airs: &[LaneAirs<F>], blobs: &BlobClaim) -> Vec<Vec<F>> {
+    let mut pv = public_values(st, airs);
+    for (v, a) in pv.iter_mut().zip(airs) {
+        if matches!(a, LaneAirs::Blob(_)) {
+            *v = blobs.public_values();
+        }
+    }
+    pv
 }
 
 /// Height of every lane's public table: initial + final accounts, as a power of two (at
@@ -202,12 +223,20 @@ where
     }
 }
 
-/// The three AIRs of one lane, in one batch proof.
+/// The AIRs of the batch proof: per lane the state and public AIRs, the shared byte table, and
+/// (in the single proof) the blob AIR.
 #[derive(Clone, Debug)]
 pub enum LaneAirs<F> {
     State(StateLaneAir),
     Bytes(ByteTableAir),
     Public(PublicAir<F>),
+    /// The statement's address table ("addr" bus).
+    Addr(AddrAir<F>),
+    /// The blob's transaction slots (H-01 (b)).
+    Tx(TxAir),
+    /// The byte-pair table of the blob AIR ("byte2" bus).
+    Pairs(BytePairTableAir),
+    Blob(BlobEvalAir),
 }
 
 impl<F: Field> BaseAir<F> for LaneAirs<F> {
@@ -216,36 +245,61 @@ impl<F: Field> BaseAir<F> for LaneAirs<F> {
             Self::State(a) => <StateLaneAir as BaseAir<F>>::width(a),
             Self::Bytes(a) => <ByteTableAir as BaseAir<F>>::width(a),
             Self::Public(a) => a.width(),
+            Self::Pairs(a) => <BytePairTableAir as BaseAir<F>>::width(a),
+            Self::Addr(a) => a.width(),
+            Self::Tx(a) => <TxAir as BaseAir<F>>::width(a),
+            Self::Blob(a) => <BlobEvalAir as BaseAir<F>>::width(a),
         }
     }
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
         match self {
             Self::Bytes(a) => a.preprocessed_trace(),
+            Self::Pairs(a) => a.preprocessed_trace(),
+            Self::Tx(a) => a.preprocessed_trace(),
+            Self::Blob(a) => a.preprocessed_trace(),
             _ => None,
         }
     }
     fn preprocessed_width(&self) -> usize {
         match self {
             Self::Bytes(_) => 1,
+            Self::Pairs(a) => <BytePairTableAir as BaseAir<F>>::preprocessed_width(a),
+            Self::Tx(a) => <TxAir as BaseAir<F>>::preprocessed_width(a),
+            Self::Blob(a) => <BlobEvalAir as BaseAir<F>>::preprocessed_width(a),
             _ => 0,
         }
     }
     fn num_periodic_columns(&self) -> usize {
         match self {
             Self::Public(a) => a.num_periodic_columns(),
+            Self::Addr(a) => a.num_periodic_columns(),
             _ => 0,
         }
     }
     fn num_public_values(&self) -> usize {
         match self {
             Self::Public(a) => <PublicAir<F> as BaseAir<F>>::num_public_values(a),
+            Self::Blob(a) => <BlobEvalAir as BaseAir<F>>::num_public_values(a),
             _ => 0,
         }
     }
     fn periodic_columns(&self) -> Cow<'_, [Vec<F>]> {
         match self {
             Self::Public(a) => a.periodic_columns(),
+            Self::Addr(a) => a.periodic_columns(),
             _ => Cow::Borrowed(&[]),
+        }
+    }
+    fn main_next_row_columns(&self) -> Vec<usize> {
+        match self {
+            Self::Addr(_) | Self::Tx(_) => vec![],
+            _ => (0..<Self as BaseAir<F>>::width(self)).collect(),
+        }
+    }
+    fn preprocessed_next_row_columns(&self) -> Vec<usize> {
+        match self {
+            Self::Tx(_) => vec![],
+            _ => (0..<Self as BaseAir<F>>::preprocessed_width(self)).collect(),
         }
     }
 }
@@ -260,6 +314,10 @@ where
             Self::State(a) => a.eval(builder),
             Self::Bytes(a) => a.eval(builder),
             Self::Public(a) => a.eval(builder),
+            Self::Pairs(a) => a.eval(builder),
+            Self::Addr(a) => a.eval(builder),
+            Self::Tx(a) => a.eval(builder),
+            Self::Blob(a) => a.eval(builder),
         }
     }
 }
@@ -281,14 +339,16 @@ pub fn lane_instance<F: Field>(st: &StateStatement, trace: &[Vec<u32>], lane: us
     let pl = public.log_rows;
     let pt = public.trace();
     (
-        vec![LaneAirs::State(StateLaneAir { lane: lane as u32 }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(public)],
+        vec![LaneAirs::State(StateLaneAir { lane: lane as u32, bind: false }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(public)],
         vec![RowMajorMatrix::new(v, WIDTH), ByteTableAir::from_counts(&counts), pt],
         vec![n.trailing_zeros() as usize, 8, pl],
     )
 }
 
-/// All 5 lanes in one batch proof: [State 0..5, Bytes (shared), Public 0..5].
-pub fn all_instance<F: Field>(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5]) -> (Vec<LaneAirs<F>>, Vec<RowMajorMatrix<F>>, Vec<usize>) {
+/// All 5 lanes and the blobs in one batch proof: [State 0..5, Bytes (shared), Public 0..5, Pairs, Blob].
+pub fn all_instance<F: Field + p3_field::PrimeField32>(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], blobs: &BlobInput) -> (Vec<LaneAirs<F>>, Vec<RowMajorMatrix<F>>, Vec<usize>) {
+    let (blob_trace, _, _) = crate::blob_eval::trace::<F>(&blobs.blobs, blobs.slots, &blobs.z);
+    let pairs = BytePairTableAir::from_counts(&crate::blob_eval::pair_counts(&blob_trace));
     let mut counts = [0u64; 256];
     let mut mains = Vec::new();
     for t in traces {
@@ -303,37 +363,61 @@ pub fn all_instance<F: Field>(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5]) 
         }
         mains.push(RowMajorMatrix::new(v, WIDTH));
     }
-    let airs = all_airs::<F>(st);
+    let log_rows = traces[0].len().trailing_zeros() as usize;
+    let airs = all_airs::<F>(st, log_rows, blobs.slots);
+    let txa = TxAir::new(blobs.slots, log_rows);
+    let tx_trace = txa.trace::<F>(&st.addrs, &blobs.blobs).expect("the blobs hold the batch's transactions");
+    TxAir::byte_counts(&tx_trace, &mut counts);
+    let addr = AddrAir::<F>::new(st);
+    let addr_trace = addr.trace(&TxAir::addr_counts(&tx_trace, st.addrs.len()));
     let mut degs: Vec<usize> = traces.iter().map(|t| t.len().trailing_zeros() as usize).collect();
     degs.push(8);
     let mut mats = mains;
     mats.push(ByteTableAir::from_counts(&counts));
-    for a in &airs[6..] {
+    for a in &airs[6..11] {
         let LaneAirs::Public(p) = a else { unreachable!() };
         degs.push(p.log_rows);
         mats.push(p.trace());
     }
+    degs.push(addr.log_rows);
+    mats.push(addr_trace);
+    degs.push(txa.log_height());
+    mats.push(tx_trace);
+    degs.push(PAIR_LOG_ROWS);
+    mats.push(pairs);
+    degs.push(BlobEvalAir::new(blobs.slots).log_rows());
+    mats.push(blob_trace);
     (airs, mats, degs)
 }
 
-/// The 11 AIRs of the single proof, from the statement alone.
-pub fn all_airs<F: Field>(st: &StateStatement) -> Vec<LaneAirs<F>> {
-    let mut v: Vec<LaneAirs<F>> = (0..5).map(|l| LaneAirs::State(StateLaneAir { lane: l })).collect();
+/// The 15 AIRs of the single proof, from the statement, the lane height and the number of
+/// blob slots: [State 0..5, Bytes, Public 0..5, Addr, Tx, Pairs, Blob] (Blob last).
+pub fn all_airs<F: Field>(st: &StateStatement, log_rows: usize, blob_slots: usize) -> Vec<LaneAirs<F>> {
+    let mut v: Vec<LaneAirs<F>> = (0..5).map(|l| LaneAirs::State(StateLaneAir { lane: l, bind: true })).collect();
     v.push(LaneAirs::Bytes(ByteTableAir));
     v.extend((0..5).map(|l| LaneAirs::Public(PublicAir::new(st, l))));
+    v.push(LaneAirs::Addr(AddrAir::new(st)));
+    v.push(LaneAirs::Tx(TxAir::new(blob_slots, log_rows)));
+    v.push(LaneAirs::Pairs(BytePairTableAir));
+    v.push(LaneAirs::Blob(BlobEvalAir::bound(blob_slots)));
     v
 }
 
-fn all_degrees(st: &StateStatement, p: &Params) -> Vec<usize> {
+/// The trace heights of the single proof.
+pub fn all_degrees(st: &StateStatement, p: &Params, blob_slots: usize) -> Vec<usize> {
     let mut d = vec![p.log_rows; 5];
     d.push(8);
     d.extend((0..5).map(|l| PublicAir::<crate::config::BabyBear>::new(st, l).log_rows));
+    d.push(addr_rows(st.addrs.len()).trailing_zeros() as usize);
+    d.push(TxAir::new(blob_slots, p.log_rows).log_height());
+    d.push(PAIR_LOG_ROWS);
+    d.push(BlobEvalAir::new(blob_slots).log_rows());
     d
 }
 
 /// The AIRs the verifier builds from the statement alone (no trace).
 pub fn lane_airs<F: Field>(st: &StateStatement, lane: usize) -> Vec<LaneAirs<F>> {
-    vec![LaneAirs::State(StateLaneAir { lane: lane as u32 }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(PublicAir::new(st, lane))]
+    vec![LaneAirs::State(StateLaneAir { lane: lane as u32, bind: false }), LaneAirs::Bytes(ByteTableAir), LaneAirs::Public(PublicAir::new(st, lane))]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -350,6 +434,31 @@ pub struct Params {
     pub budget: usize,
     /// Grinding bits before the FRI query indices.
     pub query_pow: usize,
+}
+
+/// Conjectured security floor of a production profile (audit H-02): the FRI part of the
+/// soundness, `log_blowup * queries + query_pow` bits under the usual proximity-gap
+/// conjecture. This is not a whole-system proof: the quartic BabyBear challenge field
+/// (|K| ~ 2^123.6), the lookup argument, Fiat-Shamir over Poseidon2-BN254 and the outer
+/// Groth16 each need their own analysis (docs/SIGURIA.md).
+pub const MIN_PRODUCTION_BITS: usize = 100;
+
+impl Params {
+    /// The production profile for traces of 2^`log_rows` rows: blowup 8, 28 queries, 16 bits
+    /// of query grinding = 3 * 28 + 16 = 100 conjectured bits.
+    pub const fn production(log_rows: usize) -> Self {
+        Self { log_rows, log_blowup: 3, queries: 28, budget: 3, query_pow: 16 }
+    }
+
+    /// Conjectured FRI security bits: log_blowup * queries + query_pow.
+    pub const fn conjectured_bits(&self) -> usize {
+        self.log_blowup * self.queries + self.query_pow
+    }
+
+    /// Whether this profile may secure real funds (`MIN_PRODUCTION_BITS` or more).
+    pub const fn is_production(&self) -> bool {
+        self.conjectured_bits() >= MIN_PRODUCTION_BITS
+    }
 }
 
 fn degrees(st: &StateStatement, lane: usize, p: &Params) -> Vec<usize> {
@@ -403,32 +512,41 @@ macro_rules! backend {
                 StateProof { lanes: std::array::from_fn(|l| prove_lane::<BabyBear>(st, &traces[l], l, p)) }
             }
 
-            /// All 5 lanes in ONE batch proof (one FRI, one set of openings): what the Groth16
-            /// circuit verifies, since its cost grows with the number of proofs and queries.
-            pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> BatchProof<Config<BabyBear>> {
+            /// All 5 lanes and the blobs in ONE batch proof (one FRI, one set of openings):
+            /// what the Groth16 circuit verifies, since its cost grows with the number of proofs
+            /// and queries.
+            pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], blobs: &BlobInput, p: &Params) -> BatchProof<Config<BabyBear>> {
+                prove_one_with(st, traces, blobs, p, &|_| {})
+            }
+
+            /// `prove_one` with the traces changed by `tamper` first (tests of forged traces).
+            #[doc(hidden)]
+            pub fn prove_one_with(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], blobs: &BlobInput, p: &Params, tamper: &dyn Fn(&mut Vec<RowMajorMatrix<BabyBear>>)) -> BatchProof<Config<BabyBear>> {
                 for t in traces {
                     assert_eq!(t.len(), 1 << p.log_rows);
                 }
                 let cfg = config_pow::<BabyBear>(p.log_blowup, p.queries, p.query_pow);
-                let (airs, traces, degs) = all_instance::<BabyBear>(st, traces);
+                let (airs, mut traces, degs) = all_instance::<BabyBear>(st, traces, blobs);
+                tamper(&mut traces);
                 let pd = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
                 let refs: Vec<&RowMajorMatrix<BabyBear>> = traces.iter().collect();
-                let pv = public_values(st, &airs);
+                let pv = all_public_values(st, &airs, &blobs.claim());
                 let inst = StarkInstance::new_multiple(&airs, &refs, &pv);
                 prove_batch(&cfg, &inst, &pd).expect("prove")
             }
 
-            /// Verifies a `prove_one` proof that `st` takes `old_root` to `new_root`.
-            pub fn verify_one(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &BatchProof<Config<BabyBear>>, p: &Params) -> bool {
+            /// Verifies a `prove_one` proof that `st` takes `old_root` to `new_root`, with the
+            /// blob claim `blobs`.
+            pub fn verify_one(st: &StateStatement, old_root: &[u8; 32], new_root: &[u8; 32], proof: &BatchProof<Config<BabyBear>>, blobs: &BlobClaim, p: &Params) -> bool {
                 if !(p.log_rows <= ss_rap_v2::state::MAX_LOG_ROWS as usize && st.well_formed(1 << p.log_rows) && &st.old_root() == old_root && &st.new_root() == new_root) {
                     return false;
                 }
                 let cfg = config_pow::<BabyBear>(p.log_blowup, p.queries, p.query_pow);
-                let airs = all_airs::<BabyBear>(st);
-                let Ok(pd) = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup) else {
+                let airs = all_airs::<BabyBear>(st, p.log_rows, blobs.slots());
+                let Ok(pd) = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p, blobs.slots()), &vec![p.budget; airs.len()], p.log_blowup) else {
                     return false;
                 };
-                verify_batch(&cfg, &airs, proof, &public_values(st, &airs), &pd.common).is_ok()
+                verify_batch(&cfg, &airs, proof, &all_public_values(st, &airs, blobs), &pd.common).is_ok()
             }
 
             /// Verifies that `st` takes `old_root` to `new_root` (as `ss_rap_v2::state::verify`).
@@ -467,6 +585,15 @@ pub fn tests_case(n_tx: u32, log_rows: u32) -> (StateStatement, [Vec<Vec<u32>>; 
         build(&addrs, &old, &txs, log_rows, true).unwrap()
     }
 
+/// Test helper: the blobs of the statement's transfers (made-up signatures), at a fixed point.
+#[doc(hidden)]
+pub fn tests_blobs(st: &StateStatement) -> BlobInput {
+    use num_bigint::BigUint;
+    let txs: Vec<[u8; crate::tx_bind::TX_BYTES]> = st.lanes.iter().flatten().enumerate().map(|(g, t)| crate::tx_bind::encode_transfer(st, t, 0, &[(g as u8) ^ 0x5a; 65])).collect();
+    let blobs = crate::tx_bind::blob_elements(&txs);
+    BlobInput { slots: blobs.len().next_power_of_two(), blobs, z: BigUint::parse_bytes(b"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", 16).unwrap() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::keccak::verify_lane;
@@ -493,6 +620,21 @@ mod tests {
     const P: Params = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
 
     #[test]
+    fn production_profile_meets_the_floor_and_proves() {
+        let prod = Params::production(6);
+        assert_eq!(prod.conjectured_bits(), 100);
+        assert!(prod.is_production());
+        // the CI / testnet profiles are below it
+        assert!(!P.is_production());
+        assert!(!Params { log_rows: 5, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 }.is_production());
+        // blowup 8 works with the AIRs' constraint degrees: the batch proof verifies
+        let (st, traces) = case(200, 6);
+        let b = tests_blobs(&st);
+        let proof = poseidon2_bn254::prove_one(&st, &traces, &b, &prod);
+        assert!(poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &b.claim(), &prod));
+    }
+
+    #[test]
     fn state_lanes_verify_and_forged_statements_do_not() {
         let (st, traces) = case(1100, 8); // 256 per lane, lane 4 holds 76
         let proof = prove(&st, &traces, &P);
@@ -515,8 +657,10 @@ mod tests {
     #[test]
     fn one_proof_for_all_lanes_verifies_and_forgeries_do_not() {
         let (st, traces) = case(1100, 8);
-        let proof = super::keccak::prove_one(&st, &traces, &P);
-        let ok = |s: &StateStatement| super::keccak::verify_one(s, &s.old_root(), &s.new_root(), &proof, &P);
+        let b = tests_blobs(&st);
+        let claim = b.claim();
+        let proof = super::keccak::prove_one(&st, &traces, &b, &P);
+        let ok = |s: &StateStatement| super::keccak::verify_one(s, &s.old_root(), &s.new_root(), &proof, &claim, &P);
         assert!(ok(&st), "honest");
         let mut bad = st.clone();
         bad.states[3][4].balance += 1;
@@ -526,8 +670,55 @@ mod tests {
         assert!(!ok(&bad), "final timestamp");
         // the public statement has no transfers: proving with them or without gives the same proof statement
         assert!(ok(&st.public_part()), "public part");
-        let proof = super::poseidon2_bn254::prove_one(&st, &traces, &P);
-        assert!(super::poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &P));
+        // the blob claim is part of the statement
+        let mut other = claim.clone();
+        other.s[0] += 1u32;
+        assert!(!super::keccak::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &other, &P), "blob sum");
+        let mut other = claim.clone();
+        other.d[0][2] ^= 1;
+        assert!(!super::keccak::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &other, &P), "blob digest");
+        let proof = super::poseidon2_bn254::prove_one(&st, &traces, &b, &P);
+        assert!(super::poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &claim, &P));
+    }
+
+    /// Audit H-01 (b): the blobs must hold exactly the executed transfers, each in its slot.
+    #[test]
+    fn the_blob_holds_exactly_the_executed_transfers() {
+        use crate::tx_bind::{blob_elements, encode_transfer, TX_BYTES};
+        let (st, traces) = case(300, P.log_rows as u32);
+        let txs: Vec<[u8; TX_BYTES]> = st.lanes.iter().flatten().enumerate().map(|(g, t)| encode_transfer(&st, t, 0, &[(g as u8) | 1; 65])).collect();
+        let with = |txs: &[[u8; TX_BYTES]]| BlobInput { blobs: blob_elements(txs), ..tests_blobs(&st) };
+        // a prover panic (a bus or constraint that does not hold) counts as rejection
+        let accepts = |b: &BlobInput, tamper: &dyn Fn(&mut Vec<RowMajorMatrix<BabyBear>>)| {
+            let claim = b.claim();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::keccak::prove_one_with(&st, &traces, b, &P, tamper)))
+                .map(|proof| super::keccak::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &claim, &P))
+                .unwrap_or(false)
+        };
+        assert!(accepts(&with(&txs), &|_| {}), "honest");
+        let mut t = txs.clone();
+        t[17][47] ^= 1; // amount
+        assert!(!accepts(&with(&t), &|_| {}), "another amount");
+        let mut t = txs.clone();
+        t[3][21] ^= 1; // recipient (an address outside the table)
+        let r = std::panic::catch_unwind(|| accepts(&with(&t), &|_| {}));
+        assert!(!r.unwrap_or(false), "unknown recipient");
+        let mut t = txs.clone();
+        t[3][20..40].copy_from_slice(&st.addrs[(st.lanes[0][3].to as usize + 1) % st.addrs.len()]);
+        assert!(!accepts(&with(&t), &|_| {}), "another known recipient");
+        let mut t = txs.clone();
+        t.swap(5, 6);
+        assert!(!accepts(&with(&t), &|_| {}), "two transfers swapped");
+        let mut t = txs.clone();
+        t.pop();
+        assert!(!accepts(&with(&t), &|_| {}), "a transfer missing");
+        let mut t = txs.clone();
+        t.push(t[0]);
+        assert!(!accepts(&with(&t), &|_| {}), "a transfer the lanes did not run");
+        // a slot marked inactive while its bytes hold a transfer
+        let tx_at = 13; // [State 0..5, Bytes, Public 0..5, Addr, Tx, ...]
+        let width = crate::tx_bind::SLOT_BYTES + 3;
+        assert!(!accepts(&with(&txs), &|m| m[tx_at].values[7 * width + crate::tx_bind::SLOT_BYTES] = BabyBear::ZERO), "slot switched off");
     }
 
     #[test]

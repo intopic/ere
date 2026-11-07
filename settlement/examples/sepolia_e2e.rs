@@ -1,17 +1,23 @@
-//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <out_dir> [txs] [accounts] [log_rows] [batches]
+//! cargo run --release -p ss_rap_settlement --example sepolia_e2e -- <chain_id> <settlement> <out_dir> [txs] [accounts] [log_rows] [batches]
 //!
 //! One real batch for a public testnet: signed transfers -> sequencer -> 5-lane Plonky3
 //! batch-STARK -> Plonky3 settlement circuit (Groth16) with the chain's id and the real KZG
-//! versioned hash of the batch's blob. Writes to <out_dir>:
+//! versioned hash of the batch's blob. <settlement> is the address the settlement contract will
+//! be deployed at (`cast compute-address`): the transactions are signed for it and the proof is
+//! bound to it, so the batch settles on that contract only. The Groth16 proof randomness comes
+//! from the OS (`OsRng`). Writes to <out_dir>:
 //!   E2EVerifier.sol -- Groth16 verifier of this shape (DEV key, public seed: testnet only)
 //!   blob.bin, blob2.bin, ... -- the 131072-byte EIP-4844 blob of each batch (1, 2, ...)
-//!   e2e.env, e2e2.env, ...   -- roots, batch number, blob hash and the proof, for the L1 transaction
+//!   e2e.env, e2e2.env, ...   -- roots, batch number, blob hash, blob evaluation (point, values,
+//!                               KZG openings) and the proof, for the L1 transaction
+//!   slots.txt                -- the circuit's blob slots (the contract's constructor argument)
 //! Small shape and few FRI queries (fast, NOT the production parameters).
 
 use ss_rap_settlement::blob;
 use ss_rap_settlement::fees::{CostModel, FeeSchedule, TxKind};
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
-use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, Wrapper};
+use ss_rap_settlement::pipeline::{settle_with, P3Params, P3Prover, PipelineConfig, Profile, Wrapper};
+use ss_rap_settlement::public_input::{parse_address, Domain};
 use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -23,6 +29,8 @@ fn hex(b: &[u8]) -> String {
 fn main() {
     let mut args = std::env::args().skip(1);
     let chain_id: u64 = args.next().map(|s| s.parse().expect("chain id")).unwrap_or(11155111);
+    let settlement = parse_address(&args.next().expect("settlement contract address")).expect("settlement: 0x + 40 hex digits");
+    let domain = Domain { chain_id, settlement };
     let out = PathBuf::from(args.next().unwrap_or_else(|| "out/e2e".into()));
     std::fs::create_dir_all(&out).unwrap();
     let txs: u64 = args.next().map(|s| s.parse().expect("txs")).unwrap_or(20);
@@ -33,7 +41,7 @@ fn main() {
     let addr = |i: u64| address_of(dev_key(i).verifying_key());
     let genesis: Vec<([u8; 20], u64)> = (0..accounts).map(|i| (addr(i), 1_000_000)).collect();
     let mut seq = Sequencer::new(&genesis, txs as usize, FeeSchedule::default());
-    seq.chain_id = chain_id;
+    seq.domain = domain;
     // every batch: the same senders and kinds in the same order (next nonces), so every batch
     // has the same shape and is proved with the same key
     let mut nonces = vec![0u32; accounts as usize];
@@ -42,24 +50,33 @@ fn main() {
             let from = k % accounts;
             let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
             let n = &mut nonces[from as usize];
-            seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, *n, kind, chain_id)).expect("valid tx");
+            seq.submit(Tx::signed(&dev_key(from), addr((from + 3) % accounts), 10 + k, *n, kind, &domain)).expect("valid tx");
             *n += 1;
         }
         seq.seal()
     };
     let batch = fill(&mut seq);
+    // blob slots of the shape: E2E_BLOB_SLOTS, or the first batch's blobs (rounded up)
+    let blob_slots: usize = std::env::var("E2E_BLOB_SLOTS").ok().map(|v| v.parse().expect("E2E_BLOB_SLOTS"))
+        .unwrap_or_else(|| batch.blobs().expect("blobs").len().next_power_of_two());
+    std::fs::write(out.join("slots.txt"), format!("{blob_slots}\n")).unwrap();
 
     let t0 = Instant::now();
     let p = P3Params { log_rows, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
-    let (prover, (pk, vk)) = P3Prover::new(&batch, p).expect("shape");
+    // testnet: small FRI parameters (12 conjectured bits), explicitly a development profile;
+    // E2E_PRODUCTION=1 uses the production profile (100 bits) instead
+    let (p, profile) = if std::env::var("E2E_PRODUCTION").is_ok_and(|v| v == "1") { (P3Params::production(log_rows), Profile::Production) } else { (p, Profile::Development) };
+    let prover = P3Prover::new(&batch, p, blob_slots, profile).expect("shape");
+    // DEV keys (public seed): testnet only
+    let (pk, vk) = prover.dev_keys();
     let t_setup = t0.elapsed();
-    let cfg = PipelineConfig { chain_id, ..PipelineConfig::default() };
+    let cfg = PipelineConfig { domain, ..PipelineConfig::default() };
     std::fs::write(
         out.join("E2EVerifier.sol"),
         groth16::solidity_verifier_named(&vk, "E2EVerifier", "// GENERATED by `sepolia_e2e`: DEV key (public seed), testnet only."),
     )
     .unwrap();
-    println!("SS-RAP v2 testnet batches: {} signed transfers each, chain {chain_id}", batch.txs.len());
+    println!("SS-RAP v2 testnet batches: {} signed transfers each, chain {chain_id}, settlement contract {}", batch.txs.len(), ss_rap_settlement::public_input::checksum(&settlement));
     println!("  setup (shape matrices + DEV Groth16 key): {:.1} s", t_setup.as_secs_f64());
     let mut batches = vec![batch];
     while batches.len() < num_batches {
@@ -67,9 +84,9 @@ fn main() {
     }
     for (i, batch) in batches.iter().enumerate() {
         let suffix = if i == 0 { String::new() } else { format!("{}", i + 1) };
-        let pkg = settle_with(batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default()).expect("pipeline");
+        let pkg = settle_with(batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default(), &mut rand_core::OsRng).expect("pipeline");
         let h = &pkg.header;
-        let blobs = blob::to_blobs(&batch.blob_data()).unwrap();
+        let blobs = batch.blobs().unwrap();
         let hashes: Vec<[u8; 32]> = blobs.iter().map(|b| blob::versioned_hash(b)).collect();
         assert_eq!(blob::blobs_hash(&hashes), h.blob_versioned_hash);
         let mut files = Vec::new();
@@ -80,7 +97,7 @@ fn main() {
         }
         let (a, b, c) = (g1_hex(&pkg.proof.a), g2_calldata(&pkg.proof.b), g1_hex(&pkg.proof.c));
         let env = format!(
-            "TXS={}\nBLOB_FILES={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
+            "TXS={}\nBLOB_FILES={}\nOLD_ROOT={}\nNEW_ROOT={}\nVUMT_ROOT={}\nBATCH={}\nBLOB_HASH={}\nBLOB_POINT={}\nBLOB_VALUES=[{}]\nBLOB_EVAL=({},[{}],{})\nPUBLIC_INPUT={}\nPROOF_A=[{},{}]\nPROOF_B=[[{},{}],[{},{}]]\nPROOF_C=[{},{}]\n",
             batch.txs.len(),
             files.join(","),
             hex(&h.old_state_root),
@@ -88,6 +105,11 @@ fn main() {
             hex(&h.v_umt_root),
             h.batch_number,
             hex(&h.blob_versioned_hash),
+            hex(&h.blob_point),
+            h.blob_values.iter().map(|y| hex(y)).collect::<Vec<_>>().join(","),
+            hex(&h.blob_point),
+            h.blob_values.iter().map(|y| hex(y)).collect::<Vec<_>>().join(","),
+            hex(&pkg.blob_kzg),
             fr_hex(&pkg.public_input),
             a[0], a[1], b[0][0], b[0][1], b[1][0], b[1][1], c[0], c[1],
         );

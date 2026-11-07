@@ -6,7 +6,8 @@
 //!
 //! Every transaction is signed by its sender (secp256k1 ECDSA, Ethereum addresses: the last
 //! 20 bytes of keccak256 of the public key) over a domain-separated hash that includes the chain
-//! id; `submit` recovers the signer and refuses the transaction unless it is `from`. The
+//! id and the settlement contract's address (`Domain`), so a signature for one deployment is
+//! not valid on another (testnet and mainnet, or an old and a new contract); `submit` recovers the signer and refuses the transaction unless it is `from`. The
 //! signature is checked here, not yet inside the STARK: a malicious sequencer could still sign
 //! nothing and prove a transfer (proving signatures in-circuit is a later step).
 //!
@@ -19,7 +20,7 @@
 //!   stablecoin paymaster.
 
 use crate::fees::{FeeSchedule, TxKind};
-use crate::public_input::keccak256;
+use crate::public_input::{keccak256, Domain};
 pub use ss_rap_v2::state::{AccountState, Address};
 use ss_rap_v2::state::{state_root, Transfer, MAX_NONCE};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,7 +38,7 @@ pub struct Tx {
     pub amount: u64,
     pub nonce: u32,
     pub kind: TxKind,
-    /// r (32) || s (32) || recovery id (1), over `signing_hash(chain_id)`.
+    /// r (32) || s (32) || recovery id (1), over `signing_hash(domain)`.
     pub sig: [u8; 65],
 }
 
@@ -57,10 +58,10 @@ pub fn dev_key(i: u64) -> k256::ecdsa::SigningKey {
 }
 
 impl Tx {
-    /// A transaction from the owner of `key`, signed for `chain_id`.
-    pub fn signed(key: &k256::ecdsa::SigningKey, to: Address, amount: u64, nonce: u32, kind: TxKind, chain_id: u64) -> Self {
+    /// A transaction from the owner of `key`, signed for `domain`.
+    pub fn signed(key: &k256::ecdsa::SigningKey, to: Address, amount: u64, nonce: u32, kind: TxKind, domain: &Domain) -> Self {
         let mut tx = Tx { from: address_of(key.verifying_key()), to, amount, nonce, kind, sig: [0; 65] };
-        let (sig, rec) = key.sign_prehash_recoverable(&tx.signing_hash(chain_id)).expect("sign");
+        let (sig, rec) = key.sign_prehash_recoverable(&tx.signing_hash(domain)).expect("sign");
         tx.sig[..64].copy_from_slice(&sig.to_bytes());
         tx.sig[64] = rec.to_byte();
         tx
@@ -79,16 +80,17 @@ impl Tx {
         v
     }
 
-    /// What the sender signs: keccak256(domain || chain id || body).
-    pub fn signing_hash(&self, chain_id: u64) -> [u8; 32] {
+    /// What the sender signs: keccak256(TX_DOMAIN || chain id || settlement address || body).
+    pub fn signing_hash(&self, domain: &Domain) -> [u8; 32] {
         let mut v = TX_DOMAIN.to_vec();
-        v.extend_from_slice(&chain_id.to_be_bytes());
+        v.extend_from_slice(&domain.chain_id.to_be_bytes());
+        v.extend_from_slice(&domain.settlement);
         v.extend(self.body());
         keccak256(&v)
     }
 
-    /// The address that signed this transaction for `chain_id`, if the signature is valid.
-    pub fn signer(&self, chain_id: u64) -> Option<Address> {
+    /// The address that signed this transaction for `domain`, if the signature is valid.
+    pub fn signer(&self, domain: &Domain) -> Option<Address> {
         use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
         let sig = Signature::from_slice(&self.sig[..64]).ok()?;
         // only low-s signatures: one valid signature per transaction
@@ -96,7 +98,7 @@ impl Tx {
             return None;
         }
         let rec = RecoveryId::from_byte(self.sig[64])?;
-        let key = VerifyingKey::recover_from_prehash(&self.signing_hash(chain_id), &sig, rec).ok()?;
+        let key = VerifyingKey::recover_from_prehash(&self.signing_hash(domain), &sig, rec).ok()?;
         Some(address_of(&key))
     }
 
@@ -176,6 +178,15 @@ impl SealedBatch {
     pub fn blob_data(&self) -> Vec<u8> {
         self.txs.iter().flat_map(|t| t.encode()).collect()
     }
+    /// The blobs carrying the batch (one transaction per slot, `crate::blob::tx_blobs`), or None
+    /// if it needs more than `MAX_BLOBS`.
+    pub fn blobs(&self) -> Option<Vec<Vec<u8>>> {
+        crate::blob::tx_blobs(&self.txs.iter().map(|t| t.encode()).collect::<Vec<_>>())
+    }
+    /// The transactions carried by `blobs`, or None if they are malformed.
+    pub fn decode_blobs(blobs: &[Vec<u8>]) -> Option<Vec<Tx>> {
+        crate::blob::txs_of_blobs(blobs)?.iter().map(|t| Tx::decode(t)).collect()
+    }
     /// The transactions as transfers between indices of `addrs`.
     /// The transactions of a blob (`blob_data`), or None if it is malformed.
     pub fn decode_blob(blob: &[u8]) -> Option<Vec<Tx>> {
@@ -202,8 +213,8 @@ pub struct Sequencer {
     pub schedule: FeeSchedule,
     /// Current cost per tx (micro-USD), updated from the cost model; drives the fee floor.
     pub cost_per_tx_micro_usd: u64,
-    /// Chain the signatures are bound to (the settlement contract's chain).
-    pub chain_id: u64,
+    /// Chain and settlement contract the signatures are bound to.
+    pub domain: Domain,
 }
 
 impl Sequencer {
@@ -219,7 +230,7 @@ impl Sequencer {
             max_batch,
             schedule,
             cost_per_tx_micro_usd: 0,
-            chain_id: 31337,
+            domain: Domain::DEV,
         };
         s.batch_start_root = s.state_root();
         s
@@ -244,7 +255,7 @@ impl Sequencer {
         if self.pending.len() >= self.max_batch {
             return Err(SeqError::BatchFull);
         }
-        if tx.signer(self.chain_id) != Some(tx.from) {
+        if tx.signer(&self.domain) != Some(tx.from) {
             return Err(SeqError::BadSignature);
         }
         if tx.from == tx.to {
@@ -311,14 +322,13 @@ impl Sequencer {
 mod tests {
     use super::*;
 
-    const CHAIN: u64 = 31337;
 
     fn addr(i: u64) -> Address {
         address_of(dev_key(i).verifying_key())
     }
 
     fn tx(i: u64, to: Address, amount: u64, nonce: u32, kind: TxKind) -> Tx {
-        Tx::signed(&dev_key(i), to, amount, nonce, kind, CHAIN)
+        Tx::signed(&dev_key(i), to, amount, nonce, kind, &Domain::DEV)
     }
 
     #[test]
@@ -369,12 +379,14 @@ mod tests {
         let mut unsigned = tx(1, addr(9), 1000, 0, TxKind::Transfer);
         unsigned.sig = [0; 65];
         assert_eq!(s.submit(unsigned).unwrap_err(), SeqError::BadSignature);
-        // a signature of another amount, or for another chain
+        // a signature of another amount, for another chain, or for another settlement contract
         let mut changed = tx(1, addr(9), 1, 0, TxKind::Transfer);
         changed.amount = 1000;
         assert_eq!(s.submit(changed).unwrap_err(), SeqError::BadSignature);
-        let other_chain = Tx::signed(&dev_key(1), addr(9), 1000, 0, TxKind::Transfer, 1);
+        let other_chain = Tx::signed(&dev_key(1), addr(9), 1000, 0, TxKind::Transfer, &Domain { chain_id: 1, ..Domain::DEV });
         assert_eq!(s.submit(other_chain).unwrap_err(), SeqError::BadSignature);
+        let other_contract = Tx::signed(&dev_key(1), addr(9), 1000, 0, TxKind::Transfer, &Domain { settlement: [7; 20], ..Domain::DEV });
+        assert_eq!(s.submit(other_contract).unwrap_err(), SeqError::BadSignature);
         // the high-s twin of a valid signature
         let good = tx(1, addr(9), 10, 0, TxKind::Transfer);
         let sig = k256::ecdsa::Signature::from_slice(&good.sig[..64]).unwrap();
@@ -400,9 +412,11 @@ mod tests {
         assert_eq!(blob.len(), 2 * TX_BYTES);
         let txs = SealedBatch::decode_blob(&blob).unwrap();
         assert_eq!(txs, b.txs);
-        assert!(txs.iter().all(|t| t.signer(CHAIN) == Some(t.from)), "anyone can re-check the signatures");
+        assert!(txs.iter().all(|t| t.signer(&Domain::DEV) == Some(t.from)), "anyone can re-check the signatures");
         // 1000 transfers fit in one blob (4096 field elements x 31 usable bytes)
         assert!(1000 * TX_BYTES <= 4096 * 31);
         assert!(SealedBatch::decode_blob(&blob[1..]).is_none());
+        // the blobs as posted: one transaction per 4-element slot
+        assert_eq!(SealedBatch::decode_blobs(&b.blobs().unwrap()).unwrap(), b.txs);
     }
 }

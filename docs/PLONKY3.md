@@ -175,6 +175,10 @@ Groth16 merr ~37 s dhe ~8 GB në 4 bërthama CPU; 15M kufizime në CPU janë rre
 
 Pas tabelave publike me lartësi të njëjtë për të 5 korsitë, forma 20k ka 13.98M kufizime.
 
+> Këto numra janë para rregullimeve të auditimit. Me lidhjen e blob-it (H-01) prova Plonky3 për 1 000 tx
+> merr ~28 s dhe qarku ka 9.02M kufizime; shih `docs/SIGURIA.md`, "Matja me profilin e prodhimit".
+> Kontrolli i blob-it me 0x0a shton ~50k gas për blob mbi 269k.
+
 ## Gjenerimi paralel i witness-it
 
 arkworks e sintetizon një `ConstraintSystem` në një fije, dhe `finalize` (inlinimi i LC-ve për
