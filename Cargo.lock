@@ -1494,6 +1494,7 @@ dependencies = [
  "p3-uni-stark",
  "p3-util",
  "rand_chacha",
+ "rand_core 0.6.4",
  "rayon",
  "sha2",
  "ss_rap_p3",

@@ -21,6 +21,7 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 num-bigint = "0.4"
 rand_chacha = "0.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
 blake3 = "1.5"
 ss_rap_p3 = { path = "../p3" }
 p3-bn254 = "=0.9.0-rc.2"

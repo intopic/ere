@@ -14,6 +14,8 @@ use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::Path;
 use std::time::Instant;
 
+use ss_rap_settlement::public_input::checksum;
+
 fn hex(b: &[u8; 32]) -> String {
     format!("0x{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
 }
@@ -28,17 +30,19 @@ fn main() {
     for k in 0..12u64 {
         let from = k % 6 + 1;
         let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-        let tx = Tx::signed(&dev_key(from), addr((from % 6) + 1), 10 + k, (k / 6) as u32, kind, seq.chain_id);
+        let tx = Tx::signed(&dev_key(from), addr((from % 6) + 1), 10 + k, (k / 6) as u32, kind, &seq.domain);
         seq.submit(tx).expect("valid tx");
     }
     let batch = seq.seal();
-    let cfg = PipelineConfig { chain_id: 31337, num_queries: 2, log_blowup: 2 };
+    let cfg = PipelineConfig { num_queries: 2, log_blowup: 2, ..PipelineConfig::default() };
     let shape = batch_shape(&batch, &cfg).expect("shape");
 
     let t0 = Instant::now();
     let (pk, vk) = groth16::stark_dev_setup(shape);
     let setup = t0.elapsed();
-    let pkg = settle_with(&batch, &pk, &vk, Wrapper::Stark(shape), &cfg, &schedule, &cost).expect("pipeline");
+    // seeded proof randomness: reproducible fixture (production uses an OS-seeded CSPRNG)
+    let mut rng: rand_chacha::ChaCha20Rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(batch.batch_number);
+    let pkg = settle_with(&batch, &pk, &vk, Wrapper::Stark(shape), &cfg, &schedule, &cost, &mut rng).expect("pipeline");
     let h = &pkg.header;
 
     std::fs::write(
@@ -67,6 +71,7 @@ library StarkSettlementFixture {{
     bytes32 internal constant BLOB_HASH = {blob};
     uint256 internal constant BATCH = {batch};
     uint256 internal constant CHAIN_ID = {chain};
+    address internal constant SETTLEMENT = {settlement};
     uint256 internal constant PUBLIC_INPUT = {x};
 
     function a() internal pure returns (uint256[2] memory p) {{
@@ -86,6 +91,7 @@ library StarkSettlementFixture {{
         txs = batch.txs.len(),
         q = cfg.num_queries,
         chain = h.chain_id,
+        settlement = checksum(&h.settlement),
         old = hex(&h.old_state_root),
         new = hex(&h.new_state_root),
         vumt = hex(&h.v_umt_root),

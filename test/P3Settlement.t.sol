@@ -32,6 +32,8 @@ contract P3SettlementTest {
     function setUp() public {
         groth16 = new P3WrapperVerifier();
         settlement = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)));
+        // the fixture's proof is bound to this contract's address (the test contract's 2nd CREATE)
+        require(address(settlement) == F.SETTLEMENT, "settlement is not at the fixture's address");
         vm.chainId(F.CHAIN_ID);
         blobSet.push(F.BLOB_HASH);
     }
@@ -68,5 +70,15 @@ contract P3SettlementTest {
     function test_rejectsValidPointsForWrongStatement() public {
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
         _settle(F.NEW_ROOT, F.VUMT_ROOT, F.c(), F.b(), F.a());
+    }
+
+    /// Audit SET-06: the same proof, header and blob on another deployment (same chain, key,
+    /// genesis root and aggregator) must not settle.
+    function test_rejectsSameProofOnAnotherDeployment() public {
+        SSRapSettlementVerifierV2 twin = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)));
+        vm.blobhashes(blobSet);
+        vm.prank(AGG);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        twin.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
 }

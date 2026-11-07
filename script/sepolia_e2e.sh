@@ -16,8 +16,14 @@ me=$(cast wallet address --private-key "$SEPOLIA_PRIVATE_KEY")
 cast --version
 echo "chain $chain, sender $me, balance $(cast balance "$me" --rpc-url "$SEPOLIA_RPC_URL" --ether) ETH"
 
+# the verifier is deployed at nonce N and the settlement contract at N+1: the transactions are
+# signed for, and the proofs bound to, that settlement address (audit SET-06)
+deploy_nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
+settlement_at=$(cast compute-address "$me" --nonce "$((deploy_nonce + 1))" | grep -o '0x[0-9a-fA-F]\{40\}')
+echo "settlement contract will be at $settlement_at (deployer nonce $((deploy_nonce + 1)))"
+
 # batch size and count: E2E_TXS, E2E_ACCOUNTS, E2E_LOG_ROWS, E2E_BATCHES (default 2 batches of 20 tx)
-cargo run --release --locked -p ss_rap_settlement --example sepolia_e2e -- "$chain" "$out" \
+cargo run --release --locked -p ss_rap_settlement --example sepolia_e2e -- "$chain" "$settlement_at" "$out" \
   "${E2E_TXS:-20}" "${E2E_ACCOUNTS:-8}" "${E2E_LOG_ROWS:-5}" "${E2E_BATCHES:-2}"
 cp "$out/E2EVerifier.sol" contracts/E2EVerifier.sol
 # shellcheck disable=SC1090
@@ -32,7 +38,8 @@ wait_code() {
   done
   echo "no code at $1 after 120 s"; return 1
 }
-deploy_nonce=$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")
+# proving takes minutes: the account must not have sent anything meanwhile
+[ "$(cast nonce "$me" --rpc-url "$SEPOLIA_RPC_URL")" = "$deploy_nonce" ] || { echo "the deployer's nonce moved while proving"; exit 1; }
 dv=$(forge create contracts/E2EVerifier.sol:E2EVerifier "${send[@]}" --broadcast --json --nonce "$deploy_nonce")
 verifier=$(jq -r .deployedTo <<<"$dv")
 echo "verifier $verifier"
@@ -47,6 +54,8 @@ ds=$(forge create contracts/SSRapSettlementVerifierV2.sol:SSRapSettlementVerifie
   --constructor-args "$OLD_ROOT" "$me" "$verifier")
 settlement=$(jq -r .deployedTo <<<"$ds")
 echo "settlement $settlement"
+[ "$(cast to-check-sum-address "$settlement")" = "$(cast to-check-sum-address "$settlement_at")" ] \
+  || { echo "settlement deployed at $settlement, the proofs are for $settlement_at"; exit 1; }
 wait_code "$settlement"
 
 # the proof must verify on-chain before the blob transaction is paid for

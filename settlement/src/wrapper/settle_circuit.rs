@@ -1,7 +1,7 @@
 //! R8.4: the settlement circuit. One public input, the same as the contract's:
 //!
 //! ```text
-//! x = keccak256(oldStateRoot, newStateRoot, vUmtRoot, blobhash, batchNumber, chainId) mod r
+//! x = keccak256(oldStateRoot, newStateRoot, vUmtRoot, blobhash, batchNumber, chainId, settlement) mod r
 //! ```
 //!
 //! and the circuit proves that x is the hash of a header whose
@@ -9,8 +9,9 @@
 //! - v_umt_root binds that statement and every commitment of a STARK proof (Poseidon),
 //! - STARK proof verifies for that statement (`stark_var::verify_stark`).
 //!
-//! The blob hash, batch number and chain id are free header fields: the contract supplies them
-//! (blobhash(0), its counter, block.chainid), so the proof is bound to them through x. Tying the
+//! The blob hash, batch number, chain id and settlement address are free header fields: the
+//! contract supplies them (blobsHash(), its counter, block.chainid, address(this)), so the proof
+//! is bound to them through x. Tying the
 //! blob's content to the proven transfers (KZG point evaluation) is a later step.
 
 use super::keccak_var::keccak256;
@@ -80,17 +81,19 @@ fn u256_be_bits(cs: &ConstraintSystemRef<Fr>, x: Option<u64>) -> Result<Vec<Bool
     Ok(out)
 }
 
-/// x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId) mod r, with the
+/// x = keccak256(oldRoot, newRoot, vUmtRoot, blobhash, batchNumber, chainId, settlement) mod r, with the
 /// three roots given as circuit values and the other header fields as free witnesses.
 pub fn bind_header(cs: &ConstraintSystemRef<Fr>, x: &FpVar<Fr>, old_root: &FpVar<Fr>, new_root: &FpVar<Fr>, v_umt: &FpVar<Fr>, header: Option<&BatchHeader>) -> Result<(), SynthesisError> {
     let cs = cs.clone();
-    let mut msg = Vec::with_capacity(192 * 8);
+    let mut msg = Vec::with_capacity(224 * 8);
     msg.extend(fr_bits(old_root)?);
     msg.extend(fr_bits(new_root)?);
     msg.extend(fr_bits(v_umt)?);
     msg.extend(bits_of_bytes(&cs, header.map(|h| h.blob_versioned_hash.as_slice()), 32)?);
     msg.extend(u256_be_bits(&cs, header.map(|h| h.batch_number))?);
     msg.extend(u256_be_bits(&cs, header.map(|h| h.chain_id))?);
+    let settlement = header.map(|h| crate::public_input::address_word(&h.settlement));
+    msg.extend(bits_of_bytes(&cs, settlement.as_ref().map(|w| w.as_slice()), 32)?);
     let hash = keccak256(&msg)?;
     // big-endian uint256 mod r
     let mut acc = FpVar::zero();
@@ -152,7 +155,7 @@ mod tests {
     }
 
     pub(crate) fn header(st: &StateStatement, proof: &StarkProof) -> BatchHeader {
-        BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(st, proof), blob_versioned_hash: [0x01; 32], batch_number: 7, chain_id: 31337 }
+        BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(st, proof), blob_versioned_hash: [0x01; 32], batch_number: 7, chain_id: 31337, settlement: crate::public_input::FORGE_SETTLEMENT }
     }
 
     fn sat(c: SettleCircuit) -> (bool, usize) {

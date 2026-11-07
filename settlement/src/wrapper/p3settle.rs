@@ -207,7 +207,7 @@ mod tests {
         let (proof, ops) = prove(&st, &traces, &p);
         let shape = P3SettleShape::new(&st, &p, &proof, &ops);
         let w = witness(&shape, &proof, &ops);
-        let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [1; 32], batch_number: 7, chain_id: 31337 };
+        let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [1; 32], batch_number: 7, chain_id: 31337, settlement: crate::public_input::FORGE_SETTLEMENT };
         let (ok, n) = sat(P3SettleCircuit { shape: &shape, st: Some(&st), proof: Some(&w), header: Some(&h) });
         assert!(ok, "honest batch");
         eprintln!("Plonky3 settlement circuit (300 tx, 2^7 rows, 8 queries, 8 bits of query grinding): {n} constraints");

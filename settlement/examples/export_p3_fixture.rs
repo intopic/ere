@@ -15,11 +15,13 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
 use ss_rap_p3::state::Params;
 use ss_rap_settlement::groth16::{self, fr_hex, g1_hex, g2_calldata};
-use ss_rap_settlement::public_input::BatchHeader;
+use ss_rap_settlement::public_input::{BatchHeader, FORGE_SETTLEMENT};
 use ss_rap_settlement::wrapper::par::Merged;
 use ss_rap_settlement::wrapper::p3settle::{self, v_umt_root, P3SettleCircuit, P3SettleShape};
 use std::path::Path;
 use std::time::Instant;
+
+use ss_rap_settlement::public_input::checksum;
 
 fn hex(b: &[u8; 32]) -> String {
     format!("0x{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
@@ -39,7 +41,7 @@ fn main() {
     let t_stark = t0.elapsed();
     let shape = P3SettleShape::new(&st, &p, &proof, &ops);
     let w = p3settle::witness(&shape, &proof, &ops);
-    let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [0x01; 32], batch_number: 1, chain_id: 31337 };
+    let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &w), blob_versioned_hash: [0x01; 32], batch_number: 1, chain_id: 31337, settlement: FORGE_SETTLEMENT };
 
     let print_head = || {
         println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);
@@ -96,7 +98,9 @@ fn main() {
     let Some((pk, vk)) = keys else { return };
 
     let t0 = Instant::now();
-    let g = groth16::p3_prove_with(&pk, &m.matrices, &m.assignment, 1);
+    // seeded proof randomness: reproducible fixture (production uses an OS-seeded CSPRNG)
+    let mut rng: rand_chacha::ChaCha20Rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(1);
+    let g = groth16::p3_prove_with(&pk, &m.matrices, &m.assignment, &mut rng);
     let t_prove = t0.elapsed();
     let x = h.public_input();
     let t0 = Instant::now();
@@ -131,6 +135,7 @@ library P3SettlementFixture {{
     bytes32 internal constant BLOB_HASH = {blob};
     uint256 internal constant BATCH = {batch};
     uint256 internal constant CHAIN_ID = {chain};
+    address internal constant SETTLEMENT = {settlement};
     uint256 internal constant PUBLIC_INPUT = {x};
 
     function a() internal pure returns (uint256[2] memory p) {{
@@ -148,6 +153,7 @@ library P3SettlementFixture {{
 "#,
         batch = h.batch_number,
         chain = h.chain_id,
+        settlement = checksum(&h.settlement),
         old = hex(&h.old_state_root),
         new = hex(&h.new_state_root),
         vumt = hex(&h.v_umt_root),

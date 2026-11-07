@@ -20,10 +20,16 @@
 //!   fixed batch shape.
 //! - The blob versioned hash is the real EIP-4844 one: 0x01 || sha256(KZG commitment)[1..] of
 //!   the batch's blob (`blob.rs`), the value `blobhash(0)` returns to the contract.
+//! - The header binds the deployment (`Domain`: chain id and settlement contract address), so a
+//!   proof only settles on the contract it was made for.
+//! - No implicit development defaults: the caller always names the wrapper (`settle_with`), the
+//!   Groth16 keys (`P3Prover::new` returns no key; `P3Prover::dev_keys` is the explicit DEV
+//!   setup) and the randomness of the Groth16 proof (`rng`: an OS-seeded CSPRNG such as
+//!   `rand_core::OsRng` in production; a seeded ChaCha only for reproducible fixtures).
 
 use crate::fees::{batch_economics, BatchEconomics, CostModel, FeeSchedule};
 use crate::groth16;
-use crate::public_input::BatchHeader;
+use crate::public_input::{BatchHeader, Domain};
 use crate::wrapper::settle_circuit::{SettleCircuit, SettleShape, LABEL};
 use crate::wrapper::p3settle::{self, P3SettleShape};
 use crate::wrapper::statement_var::StatementShape;
@@ -31,8 +37,7 @@ use ark_relations::r1cs::ConstraintMatrices;
 pub use ss_rap_p3::state::Params as P3Params;
 use ark_groth16::Groth16;
 use ark_snark::SNARK;
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use ark_std::rand::{CryptoRng, RngCore};
 use ss_rap_v2::hash::HashMode;
 use crate::sequencer::SealedBatch;
 use ark_bn254::{Bn254, Fr};
@@ -43,14 +48,15 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineConfig {
-    pub chain_id: u64,
+    /// Chain and settlement contract the batch settles on (bound by the public input).
+    pub domain: Domain,
     pub num_queries: usize,
     pub log_blowup: u32,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
-        Self { chain_id: 31337, num_queries: 50, log_blowup: 2 }
+        Self { domain: Domain::DEV, num_queries: 50, log_blowup: 2 }
     }
 }
 
@@ -93,14 +99,21 @@ pub struct P3Prover {
 }
 
 impl P3Prover {
-    /// The shape of `batch` proven with `params`, and the matrices of its circuit.
-    pub fn new(batch: &SealedBatch, params: P3Params) -> Result<(Self, (ProvingKey<Bn254>, VerifyingKey<Bn254>)), PipelineError> {
+    /// The shape of `batch` proven with `params`, and the matrices of its circuit. No key: the
+    /// caller loads the proving and verifying keys made for these matrices, or asks explicitly
+    /// for the development ones (`dev_keys`).
+    pub fn new(batch: &SealedBatch, params: P3Params) -> Result<Self, PipelineError> {
         let (st, traces) = state::build(&batch.addrs, &batch.old_states, &batch.transfers(), params.log_rows as u32, true).map_err(PipelineError::InvalidBatch)?;
         let (proof, ops) = p3settle::prove(&st, &traces, &params);
         let shape = P3SettleShape::new(&st, &params, &proof, &ops);
-        // DEV key (public seed). A real deployment loads the key of a setup ceremony instead.
-        let (keys, matrices) = groth16::p3_dev_setup_with_matrices(&shape);
-        Ok((Self { shape, matrices, degree_bits: proof.degree_bits.clone() }, keys))
+        let matrices = p3settle::synthesize_parallel(&shape, None, None, None, true).map_err(|_| PipelineError::ShapeMismatch)?.matrices;
+        Ok(Self { shape, matrices, degree_bits: proof.degree_bits.clone() })
+    }
+
+    /// DEVELOPMENT keys for this shape: Groth16 setup from a PUBLIC seed, so anyone can forge
+    /// proofs for them. Tests, CI and testnets only; never for real funds.
+    pub fn dev_keys(&self) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+        groth16::p3_dev_setup_from_matrices(&self.matrices)
     }
 }
 
@@ -129,17 +142,6 @@ pub enum PipelineError {
     BlobTooLarge,
 }
 
-pub fn settle(
-    batch: &SealedBatch,
-    pk: &ProvingKey<Bn254>,
-    vk: &VerifyingKey<Bn254>,
-    cfg: &PipelineConfig,
-    schedule: &FeeSchedule,
-    cost: &CostModel,
-) -> Result<SettlementPackage, PipelineError> {
-    settle_with(batch, pk, vk, Wrapper::Dev, cfg, schedule, cost)
-}
-
 /// The statement shape and STARK parameters of a batch (what a settlement circuit key fixes).
 pub fn batch_shape(batch: &SealedBatch, cfg: &PipelineConfig) -> Result<SettleShape, PipelineError> {
     let params = state::params(batch.txs.len(), cfg.log_blowup, cfg.num_queries);
@@ -155,9 +157,10 @@ pub fn settle_with(
     cfg: &PipelineConfig,
     schedule: &FeeSchedule,
     cost: &CostModel,
+    rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<SettlementPackage, PipelineError> {
     if let Wrapper::P3(prover) = wrapper {
-        return settle_p3(batch, pk, vk, prover, cfg, schedule, cost);
+        return settle_p3(batch, pk, vk, prover, cfg, schedule, cost, rng);
     }
     let params = state::params(batch.txs.len(), cfg.log_blowup, cfg.num_queries);
     // One constant label: chain id and batch number are bound through the public input.
@@ -184,21 +187,21 @@ pub fn settle_with(
         v_umt_root: v_umt_root(&st, &stark_proof),
         blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
         batch_number: batch.batch_number,
-        chain_id: cfg.chain_id,
+        chain_id: cfg.domain.chain_id,
+        settlement: cfg.domain.settlement,
     };
     let x = header.public_input();
     let t0 = Instant::now();
     let proof = match wrapper {
-        Wrapper::Dev => groth16::prove(pk, x, batch.batch_number),
+        Wrapper::Dev => groth16::prove(pk, x, rng),
         Wrapper::P3(_) => unreachable!(),
         Wrapper::Stark(shape) => {
             let p = &shape.params;
             if StatementShape::of(&st, params.log_rows) != shape.statement || (p.log_rows, p.log_blowup, p.num_queries) != (params.log_rows, params.log_blowup, params.num_queries) {
                 return Err(PipelineError::ShapeMismatch);
             }
-            let mut rng = ChaCha20Rng::seed_from_u64(batch.batch_number);
             let c = SettleCircuit { shape, st: Some(&st), proof: Some(&stark_proof), header: Some(&header) };
-            Groth16::<Bn254>::prove(pk, c, &mut rng).map_err(|_| PipelineError::Groth16Rejected)?
+            Groth16::<Bn254>::prove(pk, c, rng).map_err(|_| PipelineError::Groth16Rejected)?
         }
     };
     timings.groth16_prove = t0.elapsed();
@@ -229,6 +232,7 @@ fn settle_p3(
     cfg: &PipelineConfig,
     schedule: &FeeSchedule,
     cost: &CostModel,
+    rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<SettlementPackage, PipelineError> {
     let p = prover.shape.params;
     let mut timings = Timings::default();
@@ -253,12 +257,13 @@ fn settle_p3(
         v_umt_root: p3settle::v_umt_root(&st, &w),
         blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
         batch_number: batch.batch_number,
-        chain_id: cfg.chain_id,
+        chain_id: cfg.domain.chain_id,
+        settlement: cfg.domain.settlement,
     };
     let x = header.public_input();
     let t0 = Instant::now();
     let z = p3settle::witness_parallel(&prover.shape, &st, &w, &header).map_err(|_| PipelineError::Groth16Rejected)?;
-    let proof_g = groth16::p3_prove_with(pk, &prover.matrices, &z, batch.batch_number);
+    let proof_g = groth16::p3_prove_with(pk, &prover.matrices, &z, rng);
     timings.groth16_prove = t0.elapsed();
     let t0 = Instant::now();
     if !groth16::verify(vk, x, &proof_g) {
@@ -288,6 +293,10 @@ mod tests {
         address_of(dev_key(i).verifying_key())
     }
 
+    fn test_rng() -> rand_chacha::ChaCha20Rng {
+        rand_chacha::rand_core::SeedableRng::seed_from_u64(1)
+    }
+
     #[test]
     fn small_batch_end_to_end() {
         let genesis: Vec<([u8; 20], u64)> = (0..8u64).map(|i| (addr(i), 1_000_000)).collect();
@@ -295,13 +304,13 @@ mod tests {
         for k in 0..40u64 {
             let from = k % 8;
             let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-            let tx = Tx::signed(&dev_key(from), addr((from + 1) % 8), 10 + k, (k / 8) as u32, kind, seq.chain_id);
+            let tx = Tx::signed(&dev_key(from), addr((from + 1) % 8), 10 + k, (k / 8) as u32, kind, &seq.domain);
             seq.submit(tx).unwrap();
         }
         let batch = seq.seal();
         let (pk, vk) = groth16::dev_setup();
         let cfg = PipelineConfig { num_queries: 8, ..PipelineConfig::default() };
-        let pkg = settle(&batch, &pk, &vk, &cfg, &FeeSchedule::default(), &CostModel::default()).unwrap();
+        let pkg = settle_with(&batch, &pk, &vk, Wrapper::Dev, &cfg, &FeeSchedule::default(), &CostModel::default(), &mut test_rng()).unwrap();
         assert_eq!(pkg.header.old_state_root, batch.old_state_root);
         assert_eq!(pkg.public_input, pkg.header.public_input());
         assert!(groth16::verify(&vk, pkg.public_input, &pkg.proof));
@@ -313,12 +322,12 @@ mod tests {
     fn header_roots_must_be_the_proven_roots() {
         let genesis: Vec<([u8; 20], u64)> = (0..4u64).map(|i| (addr(i), 1_000)).collect();
         let mut seq = Sequencer::new(&genesis, 16, FeeSchedule::default());
-        seq.submit(Tx::signed(&dev_key(0), addr(9), 5, 0, TxKind::Transfer, seq.chain_id)).unwrap();
+        seq.submit(Tx::signed(&dev_key(0), addr(9), 5, 0, TxKind::Transfer, &seq.domain)).unwrap();
         let mut batch = seq.seal();
         batch.new_state_root[0] ^= 1;
         let (pk, vk) = groth16::dev_setup();
         let cfg = PipelineConfig { num_queries: 8, ..PipelineConfig::default() };
-        let r = settle(&batch, &pk, &vk, &cfg, &FeeSchedule::default(), &CostModel::default());
+        let r = settle_with(&batch, &pk, &vk, Wrapper::Dev, &cfg, &FeeSchedule::default(), &CostModel::default(), &mut test_rng());
         assert!(matches!(r, Err(PipelineError::RootMismatch)));
     }
 }

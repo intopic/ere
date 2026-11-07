@@ -14,6 +14,9 @@ import {IGroth16Verifier} from "./IGroth16Verifier.sol";
  *      2. The public input binds oldStateRoot, newStateRoot, vUmtMerkleRoot (all STARK
  *         commitments), the EIP-4844 blob of the batch, the batch number and the chain id,
  *         exactly as in the PDF (f.14-15); settlement/src/public_input.rs computes the same value.
+ *      3. The public input also binds this contract's own address (audit SET-06): a proof made
+ *         for one deployment does not verify on another one with the same key, state and
+ *         counter (testnet and mainnet, or an old and a new version on the same chain).
  */
 contract SSRapSettlementVerifierV2 {
     uint256 internal constant R_MOD =
@@ -38,8 +41,10 @@ contract SSRapSettlementVerifierV2 {
     error InvalidStateTransition();
     error MissingEip4844Blob();
     error InvalidGroth16Proof();
+    error InvalidDeployment();
 
     constructor(bytes32 genesisStateRoot, address aggregator, IGroth16Verifier groth16Verifier) {
+        if (aggregator == address(0) || address(groth16Verifier).code.length == 0) revert InvalidDeployment();
         latestStateRoot = genesisStateRoot;
         sequencerAggregator = aggregator;
         verifier = groth16Verifier;
@@ -55,7 +60,15 @@ contract SSRapSettlementVerifierV2 {
     ) public view returns (uint256) {
         return uint256(
             keccak256(
-                abi.encodePacked(oldStateRoot, newStateRoot, vUmtMerkleRoot, blobVersionedHash, batchNumber, block.chainid)
+                abi.encodePacked(
+                    oldStateRoot,
+                    newStateRoot,
+                    vUmtMerkleRoot,
+                    blobVersionedHash,
+                    batchNumber,
+                    block.chainid,
+                    uint256(uint160(address(this)))
+                )
             )
         ) % R_MOD;
     }

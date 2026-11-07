@@ -8,20 +8,21 @@ library StarkSettlementFixture {
     bytes32 internal constant OLD_ROOT = 0x8114dbf6aaf59106206f49e94a9306ad41c890e1445fff49d70fefbf6dae1f0d;
     bytes32 internal constant NEW_ROOT = 0xf303bb8cdc23b5d195163b1ba7abf6948f86bf769c262bbecb77aad7dfe83130;
     bytes32 internal constant VUMT_ROOT = 0x54430ff91ee135e6ecdeaf9075c9513b150309f9e789162328ae93b122d9df22;
-    bytes32 internal constant BLOB_HASH = 0x01f3e92a0a4d5485917a4f11657b3aa50517e62053acf87019c93faf454d9338;
+    bytes32 internal constant BLOB_HASH = 0x01366141cce5f29fca29ec49b6fbd7c6e09325f7f1d64190212fe80d35416a8c;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
-    uint256 internal constant PUBLIC_INPUT = 0x27cfa84c87ae765414e453bd84d29e5b81812a1d083afb8c11eebf94137cb1bf;
+    address internal constant SETTLEMENT = 0x2e234DAe75C793f67A35089C9d99245E1C58470b;
+    uint256 internal constant PUBLIC_INPUT = 0x29c04b9108aafe19be9ede85351f105bbc2c8b45f51721d4293395b4e3942a06;
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x0e0dab418048e694494702bd0079c2e1651d710f7f03d1d5d9fa60d3347f34a6), uint256(0x1f7e8194d4f540221ae9b3fee9a97bddce683f02e0dd655a55f72ffcb2f9b692)];
+        p = [uint256(0x2f273bc645d301d4c88d1b2e139003472405630979e8123049019d48b9bd41a5), uint256(0x1ee625ecc76962645106cbd4b71f9a13a5d0ad38b7bbf33668ecd8b3ca093e47)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
-        p = [[uint256(0x014bb894b07ae508545f87eda12a699a090cfb26303e9614e65c9cd01c8e0cab), uint256(0x00f6c11a4118ea3323f3adaeb96ccfbf41783b4c9e20d271d1da4df11ae29d38)], [uint256(0x08b2d8e249c7087175a2e0036acfad7cfc0170c2d2a1504009c0d86250171a1d), uint256(0x2388f87f94453e0596b6d5195239996f0b436a6d67b56ffbfe5c4dfff5f57334)]];
+        p = [[uint256(0x2f91d39c457bc53424a8d1ef40d11ff25a6326dfe01b4bcd1189d0211534a814), uint256(0x0a6425c24bb2fa5889e806bfa72433ed1c10c8fd3bc64189ba7524e9dc2eb345)], [uint256(0x090da2d02af4dad58ba90a325a2f5aac6d9d3cc35e2ff8057b4f0a0c3df66f5c), uint256(0x0f363ab1c20a0090a062de3ab1171fdcc6b04927f134e37725f5d52cdf1dd86b)]];
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x23f4728dbbb5526554b6729d75f9eeb058afce887c2e9aa11279c9ec15e0efb7), uint256(0x258005b041f066cadeb061f05e567d139d94b7944d6c3f784c60efede551141a)];
+        p = [uint256(0x068bc17fd8d66ba4386196ba45967dc5ac9f2a40d25cf1eaa24c66062aea8272), uint256(0x0c3e61293615becc78124cd8da020ffeea335a438f43b2ed6ee1222dfbb2d8da)];
     }
 }

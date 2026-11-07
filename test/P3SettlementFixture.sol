@@ -11,17 +11,18 @@ library P3SettlementFixture {
     bytes32 internal constant BLOB_HASH = 0x0101010101010101010101010101010101010101010101010101010101010101;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
-    uint256 internal constant PUBLIC_INPUT = 0x11f12fa138b13f7c12a43b0854a7e1786c3f492d61c08034f114d6db4b268e02;
+    address internal constant SETTLEMENT = 0x2e234DAe75C793f67A35089C9d99245E1C58470b;
+    uint256 internal constant PUBLIC_INPUT = 0x11839778bc2ad1220dee19a014233a0d7569b41d1b05a02ecc8cb7302a295cbc;
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x1c905ac369b1e596aeddf57cb130d3b321e2571742d846a88f6f02cb2e8179ff), uint256(0x25b439f906217e8aca448f4c61dc60b7f9153e4dd5c2b8fc55a4eadb84daec9b)];
+        p = [uint256(0x2d2f68350d767cbfff21a2202d20f10bddf4bb1bdd82763b9046001e3a90861f), uint256(0x2e700e582a2aade5874fda19451b787a85e9e5e83d3e20413b9010bf9a89c69a)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
-        p = [[uint256(0x1c6b0789b96e4e21d9508bfe281cb93181f7c2baaed23281c796231c99ee9d94), uint256(0x2351f885dd8ad1aa9f88b44787a180bb00376bb89b0544d7ba1032e063235542)], [uint256(0x2cbd0567c593bc46a4bd68a72304f8e07edd10e45fdf900ee715656f6732cf76), uint256(0x289cbbdbd9ab9fd5a64d46b7b89ff51a85c7b0db8e579fed2f7abfbc1a76f0e5)]];
+        p = [[uint256(0x28341793f23e39f571dfff867fc9f634a14b934f8ae1ba2d057eef1037179e58), uint256(0x08f054804fbdb690f6e59cf2d9b7c6018060d02e36963a9381796c7f8afaf440)], [uint256(0x108d747cc1d54c8f8a35602390f44466937e2fc7007ad94bb666513339c27f9e), uint256(0x2232891e498875bd6fd9846933eb58278db935a77bb8c17fb5fb8c1059efb7b2)]];
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x0b8b0b7e862dbc14cf318345559de26844f3537526f68693a0bb1a81fb4d1549), uint256(0x2cc88287c38c21bd14a780781447c061c4a0946c50132e206bd2e57fde13c391)];
+        p = [uint256(0x17e8a139463e8ca01a8b8cbacdbddcbaafd11c5d6b226dff984072f6f8c558e6), uint256(0x06bb2217e16f3d5624234964df88342bb4467e12b5e6d998d6f7791b1570513f)];
     }
 }
