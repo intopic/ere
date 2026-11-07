@@ -150,9 +150,10 @@ pub enum Cell {
 }
 
 /// The columns of `ss_rap_p3::state::PublicAir::new(st, lane)` for any statement of shape
-/// `shape`: initial accounts (weight -1), final accounts (+1), then the lane's transfers (+1),
-/// padded with zero rows to the height of the largest lane's table (`public_rows`).
+/// `shape`: initial accounts (weight -1) and final accounts (+1), padded with zero rows to
+/// `public_rows`. The Plonky3 path keeps the transfers private, so `shape` has none.
 pub fn p3_layout(shape: &StatementShape, lane: usize) -> Vec<Vec<Cell>> {
+    assert!(shape.lane_txs.iter().all(|&t| t == 0), "the Plonky3 statement has no public transfers");
     const P: u32 = 2013265921;
     let k = |c: u32| Cell::Const(c);
     let zeros = |n: usize| vec![k(0); n];
@@ -163,21 +164,13 @@ pub fn p3_layout(shape: &StatementShape, lane: usize) -> Vec<Vec<Cell>> {
             let mut r = vec![k(id as u32), Cell::Var(Src::Nonce(t, id), 30), ts];
             r.extend((0..8).map(|b| Cell::Var(Src::Byte(t, id, b), 8)));
             r.push(k(w));
-            r.extend(zeros(13));
             rows.push(r);
         }
     }
-    for j in 0..shape.lane_txs[lane] {
-        let mut r = zeros(12);
-        r.extend([k(j as u32 + 1), Cell::Var(Src::From(lane, j), 31), Cell::Var(Src::To(lane, j), 31), Cell::Var(Src::TxNonce(lane, j), 30)]);
-        r.extend((0..8).map(|b| Cell::Var(Src::Amt(lane, j, b), 8)));
-        r.push(k(1));
-        rows.push(r);
-    }
     // as `ss_rap_p3::state::public_rows`
-    let n = shape.lane_txs.iter().map(|&t| 2 * shape.accounts + t).max().unwrap().next_power_of_two().max(4);
-    rows.resize(n, zeros(25));
-    (0..25).map(|j| rows.iter().map(|r| r[j]).collect()).collect()
+    let n = (2 * shape.accounts).next_power_of_two().max(4);
+    rows.resize(n, zeros(12));
+    (0..12).map(|j| rows.iter().map(|r| r[j]).collect()).collect()
 }
 
 /// The value of a cell's source in `st`.
@@ -198,7 +191,9 @@ impl StatementVar {
         let k = shape.accounts;
         assert!(k > 0 && (k as u32) < MAX_NONCE);
         if let Some(st) = st {
-            assert_eq!(StatementShape::of(st, shape.log_rows), shape, "statement of another shape");
+            // a shape without transfers takes the public part of any statement (Plonky3 path)
+            let of = if shape.lane_txs == [0; DEFAULT_RNS_CHANNELS] { StatementShape::of(&st.public_part(), shape.log_rows) } else { StatementShape::of(st, shape.log_rows) };
+            assert_eq!(of, shape, "statement of another shape");
         }
         let n_rows = 1u64 << shape.log_rows;
         assert!(shape.lane_txs.iter().all(|&l| l as u64 <= n_rows));
@@ -379,9 +374,13 @@ mod tests {
                 assert_eq!(a.values, vals.iter().map(|v| v.value().unwrap()).collect::<Vec<_>>());
             }
         }
-        // the Plonky3 public AIRs' periodic columns and the digest limbs
+        // the Plonky3 public AIRs' periodic columns and the digest limbs: the statement without
+        // its transfers (they are private in the Plonky3 proof)
         type BB = p3_baby_bear::BabyBear;
         use p3_field::PrimeField32;
+        let pshape = StatementShape::of(&st.public_part(), 8);
+        let sv = StatementVar::witness(&cs, Some(&st), pshape).unwrap();
+        assert_eq!(sv.digest.value().unwrap(), hash_to_fr(&st.public_part().digest()));
         for lane in 0..DEFAULT_RNS_CHANNELS {
             let native = ss_rap_p3::state::PublicAir::<BB>::new(&st, lane).cols;
             let circ = sv.p3_public_cols(lane);

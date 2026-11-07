@@ -46,13 +46,14 @@ impl P3SettleShape {
     /// The shape of `st` proven with `p`. `proof` and `ops` (its verification log) may come from
     /// any statement of the same shape: only sizes and transcript seeds are read from them.
     pub fn new(st: &StateStatement, p: &Params, proof: &BatchProof<record::Config>, ops: &[Op]) -> Self {
-        Self { statement: StatementShape::of(st, p.log_rows as u32), batch: batch_shape(st, p, &proof.degree_bits, ops), params: *p }
+        // the transfers are private in the Plonky3 proof: the circuit sees the tables only
+        Self { statement: StatementShape::of(&st.public_part(), p.log_rows as u32), batch: batch_shape(st, p, &proof.degree_bits, ops), params: *p }
     }
 }
 
 /// Native v_umt_root of a proof (`w = batch_witness(..)`) of `st`.
 pub fn v_umt_root(st: &StateStatement, w: &BatchWitness) -> [u8; 32] {
-    let mut v = vec![hash_to_fr(&st.digest()), w.main, w.perm, w.quotient];
+    let mut v = vec![hash_to_fr(&st.public_part().digest()), w.main, w.perm, w.quotient];
     v.extend(w.fri.commit_phase_commits.iter().copied());
     fr_to_hash(&poseidon_hash(&v))
 }
@@ -127,7 +128,7 @@ fn statement<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement
         });
     }
     let fr = |f: fn(&StateStatement) -> [u8; 32]| st.map(|st| hash_to_fr(&f(st)));
-    let digest = slot(cs, fr(StateStatement::digest))?;
+    let digest = slot(cs, fr(|st| st.public_part().digest()))?;
     let old_root = slot(cs, fr(StateStatement::old_root))?;
     let new_root = slot(cs, fr(StateStatement::new_root))?;
     let native_limbs = st.map(ss_rap_p3::state::digest_limbs);

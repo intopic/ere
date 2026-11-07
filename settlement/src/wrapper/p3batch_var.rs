@@ -755,10 +755,14 @@ mod tests {
         let (ok, n) = run(&st, &w);
         assert!(ok, "honest proof");
         eprintln!("Plonky3 batch verifier, 600 transfers, 5 lanes x 2^8 rows, blowup 2 x 20 queries: {n} constraints");
-        // another statement (a different transfer amount in lane 0): periodic columns and digest change
+        // another statement (a different balance in the table after lane 0): periodic columns and digest change
         let mut st2 = st.clone();
-        st2.lanes[0][3].amount += 1;
+        st2.states[1][3].balance += 1;
         assert!(!run(&st2, &w).0, "proof of another statement");
+        // the transfers are private: another transfer list is the same statement
+        let mut st3 = st.clone();
+        st3.lanes[0][3].amount += 1;
+        assert!(run(&st3, &w).0, "transfers are not part of the statement");
         // a forged opened value
         let mut bw = w.clone();
         bw.inst[0].main_local[7][0] = (bw.inst[0].main_local[7][0] + 1) % 2013265921;

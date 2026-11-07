@@ -237,7 +237,7 @@ fn settle_p3(
     if st.old_root() != batch.old_state_root || st.new_root() != batch.new_state_root {
         return Err(PipelineError::RootMismatch);
     }
-    if StatementShape::of(&st, p.log_rows as u32) != prover.shape.statement {
+    if StatementShape::of(&st.public_part(), p.log_rows as u32) != prover.shape.statement {
         return Err(PipelineError::ShapeMismatch);
     }
     // proves and verifies natively (panics if the native verifier rejects)

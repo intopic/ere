@@ -1,21 +1,27 @@
 //! The state-transition AIR (`ss_rap_v2::state`) on Plonky3, one BabyBear proof per lane (the 5 lanes split the transfers).
 //!
-//! Same columns and constraints as the in-house AIR. The two buses become named Plonky3 buses:
-//! "mem" (offline memory check: id, nonce, ts, balance bytes) and "tx" (t, from, to, nonce,
-//! amount bytes); every byte column goes on the "byte" bus to `ByteTableAir`.
+//! Same columns and constraints as the in-house AIR. The memory bus becomes the named Plonky3
+//! bus "mem" (offline memory check: id, nonce, ts, balance bytes); every byte column goes on the
+//! "byte" bus to `ByteTableAir`.
 //!
-//! The public side of the buses (initial table, final table, the lane's transactions) is
-//! `PublicAir`: its tuples are *periodic columns* built from the statement. Plonky3 binds
-//! periodic columns into the transcript and the verifier evaluates them itself, so they act
-//! as public columns: the prover cannot change them, and Plonky3's terminal-sum check
-//! (all buses sum to zero) then gives exactly init + writes = reads + final and
-//! "every public transaction executed once, at its index".
+//! The transfers are private: they live only in the committed lane traces, and the statement
+//! the proof is about is the account tables alone (`StateStatement::public_part`). The proof
+//! says: the final tables follow from the initial ones by valid transfers (balance and nonce
+//! rules of every row), whatever those transfers were. So the size of what the verifier, and the
+//! Groth16 wrapper, evaluates does not grow with the number of transfers. Binding the transfers
+//! to the published blob (and their signatures) is a separate step, not done here.
+//!
+//! The public side of the memory bus (initial and final tables) is `PublicAir`: its tuples are
+//! *periodic columns* built from the statement. Plonky3 binds periodic columns into the
+//! transcript and the verifier evaluates them itself, so they act as public columns: the prover
+//! cannot change them, and Plonky3's terminal-sum check (all buses sum to zero) then gives
+//! exactly init + writes = reads + final.
 //!
 //! Fiat-Shamir binding of the statement: `p3-batch-stark` 0.9.0-rc.2 does NOT observe periodic
 //! columns (nor `BaseAir::periodic_statement`) in its transcript. Without more, a prover could
 //! commit a public trace with made-up tuples, learn zeta, and only then pick a statement whose
 //! periodic columns satisfy the one combined check at zeta. So the lane-0 public AIR declares
-//! `DIGEST_LIMBS` public values, the statement digest (`StateStatement::digest`, Poseidon-BN254)
+//! `DIGEST_LIMBS` public values, the statement digest (`public_part().digest()`, Poseidon-BN254)
 //! in 30-bit limbs: Plonky3 observes public values right after the main commitment, before
 //! any challenge, and the verifier recomputes them from the statement it is given.
 use crate::mulmod::ByteTableAir;
@@ -87,16 +93,12 @@ where
         builder.push_interaction("mem", mem(&tag, c[FROM_ID].clone(), c[NONCE].clone() + one.clone(), two_t.clone(), &c[FROM_NEW..FROM_NEW + 8]), w(-act.clone()));
         builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), c[TR2].clone(), &c[TO_OLD..TO_OLD + 8]), w(act.clone()));
         builder.push_interaction("mem", mem(&tag, c[TO_ID].clone(), c[TO_NONCE].clone(), two_t + one, &c[TO_NEW..TO_NEW + 8]), w(-act.clone()));
-        let mut tx = vec![tag.clone(), c[T].clone(), c[FROM_ID].clone(), c[TO_ID].clone(), c[NONCE].clone()];
-        tx.extend_from_slice(&c[AMT..AMT + 8]);
-        builder.push_interaction("tx", tx, w(-act));
     }
 }
 
-/// Columns of `PublicAir`: 11 mem values + weight, 12 tx values + weight.
+/// Columns of `PublicAir`: 11 mem values + weight.
 const PUB_MEM: usize = 11;
-const PUB_TX: usize = 12;
-const PUB_COLS: usize = PUB_MEM + 1 + PUB_TX + 1;
+const PUB_COLS: usize = PUB_MEM + 1;
 
 /// Public values of the lane-0 public AIR: the statement digest in 30-bit limbs.
 pub const DIGEST_LIMBS: usize = 9;
@@ -104,7 +106,7 @@ pub const LIMB_BITS: usize = 30;
 
 /// The statement digest (LE bytes of a BN254 element) as `DIGEST_LIMBS` limbs of `LIMB_BITS`.
 pub fn digest_limbs(st: &StateStatement) -> Vec<u32> {
-    let d = st.digest();
+    let d = st.public_part().digest();
     let bit = |i: usize| if i < 256 { ((d[i / 8] >> (i % 8)) & 1) as u32 } else { 0 };
     (0..DIGEST_LIMBS).map(|k| (0..LIMB_BITS).map(|b| bit(k * LIMB_BITS + b) << b).sum()).collect()
 }
@@ -115,11 +117,10 @@ pub fn public_values<F: Field>(st: &StateStatement, airs: &[LaneAirs<F>]) -> Vec
     airs.iter().map(|a| if a.num_public_values() > 0 { limbs.clone() } else { vec![] }).collect()
 }
 
-/// Height of every lane's public table: initial + final accounts + the largest lane's
-/// transfers, as a power of two (at least 4).
+/// Height of every lane's public table: initial + final accounts, as a power of two (at
+/// least 4). It does not depend on the number of transfers.
 pub fn public_rows(st: &StateStatement) -> usize {
-    let k = st.addrs.len();
-    st.lanes.iter().map(|l| 2 * k + l.len()).max().unwrap_or(0).next_power_of_two().max(4)
+    (2 * st.addrs.len()).next_power_of_two().max(4)
 }
 
 /// The public side of the "mem" and "tx" buses for lane `lane`, as periodic columns.
@@ -136,7 +137,7 @@ fn bal_bytes(b: u64) -> [u32; 8] {
 }
 
 impl<F: Field> PublicAir<F> {
-    /// init (weight -1), final (+1) and the lane's transactions (+1): minus what the
+    /// init (weight -1) and final (+1) account tables: minus what the
     /// in-house verifier adds as `bus_sum`, because Plonky3 checks that all buses sum to zero.
     pub fn new(st: &StateStatement, lane: usize) -> Self {
         let mut rows: Vec<Vec<F>> = Vec::new();
@@ -145,7 +146,6 @@ impl<F: Field> PublicAir<F> {
             let mut r = vec![f(id), f(nonce), f(ts)];
             r.extend(bal_bytes(bal).map(f));
             r.push(w);
-            r.extend(std::iter::repeat_n(F::ZERO, PUB_TX + 1));
             rows.push(r);
         };
         for (id, s) in st.states[lane].iter().enumerate() {
@@ -153,13 +153,6 @@ impl<F: Field> PublicAir<F> {
         }
         for (id, s) in st.states[lane + 1].iter().enumerate() {
             push_mem(&mut rows, id as u32, s.nonce, st.final_ts[lane][id], s.balance, F::ONE);
-        }
-        for (k, tx) in st.lanes[lane].iter().enumerate() {
-            let mut r = vec![F::ZERO; PUB_MEM + 1];
-            r.extend([f(k as u32 + 1), f(tx.from), f(tx.to), f(tx.nonce)]);
-            r.extend(bal_bytes(tx.amount).map(f));
-            r.push(F::ONE);
-            rows.push(r);
         }
         // every lane's public table has the height of the largest one: one evaluation domain
         // for all 5 (a verifier shares the barycentric weights)
@@ -206,7 +199,6 @@ where
         let tag = AB::Expr::from_u32(self.lane);
         let with_tag = |v: &[AB::Expr]| std::iter::once(tag.clone()).chain(v.iter().cloned()).collect::<Vec<_>>();
         builder.push_interaction("mem", with_tag(&p[..PUB_MEM]), Count::bounded(p[PUB_MEM].clone(), 1));
-        builder.push_interaction("tx", with_tag(&p[PUB_MEM + 1..PUB_MEM + 1 + PUB_TX]), Count::bounded(p[PUB_COLS - 1].clone(), 1));
     }
 }
 
@@ -510,17 +502,14 @@ mod tests {
         bad.states[3][4].balance += 1;
         assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[2], 2, &P), "final table of lane 2");
         assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[3], 3, &P), "initial table of lane 3");
-        // a different transaction in lane 0
         let mut bad = st.clone();
-        bad.lanes[0][5].amount += 1;
-        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[0], 0, &P), "tx amount");
-        let mut bad = st.clone();
-        bad.lanes[1].swap(0, 1);
-        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[1], 1, &P), "tx order");
-        // a dropped transaction
-        let mut bad = st.clone();
-        assert!(bad.lanes[4].pop().is_some());
-        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[4], 4, &P), "dropped tx");
+        bad.states[1][0].nonce += 1;
+        assert!(!verify_lane::<BabyBear>(&bad, &proof.lanes[0], 0, &P), "nonce in the table after lane 0");
+        // the transfers are private: the statement is the tables alone
+        let mut other = st.clone();
+        other.lanes[0][5].amount += 1;
+        other.lanes[4].pop();
+        assert!(verify_lane::<BabyBear>(&other, &proof.lanes[0], 0, &P) && other.public_part() == st.public_part());
     }
 
     #[test]
@@ -533,14 +522,10 @@ mod tests {
         bad.states[3][4].balance += 1;
         assert!(!ok(&bad), "intermediate table");
         let mut bad = st.clone();
-        bad.lanes[0][5].amount += 1;
-        assert!(!ok(&bad), "tx amount");
-        let mut bad = st.clone();
-        let tx = bad.lanes[4].pop().unwrap();
-        assert!(!ok(&bad), "dropped tx");
-        // moving a tx to another lane must not verify (lane tags separate the buses)
-        bad.lanes[3].push(tx);
-        assert!(!ok(&bad), "tx moved across lanes");
+        bad.final_ts[2][1] += 1;
+        assert!(!ok(&bad), "final timestamp");
+        // the public statement has no transfers: proving with them or without gives the same proof statement
+        assert!(ok(&st.public_part()), "public part");
         let proof = super::poseidon2_bn254::prove_one(&st, &traces, &P);
         assert!(super::poseidon2_bn254::verify_one(&st, &st.old_root(), &st.new_root(), &proof, &P));
     }
@@ -551,8 +536,8 @@ mod tests {
         let proof = poseidon2_bn254::prove(&st, &traces, &P);
         assert!(poseidon2_bn254::verify(&st, &st.old_root(), &st.new_root(), &proof, &P));
         let mut bad = st.clone();
-        bad.lanes[2][0].to ^= 1;
-        assert!(!poseidon2_bn254::verify_lane::<BabyBear>(&bad, &proof.lanes[2], 2, &P));
+        bad.states[5][0].balance ^= 1;
+        assert!(!poseidon2_bn254::verify_lane::<BabyBear>(&bad, &proof.lanes[4], 4, &P));
     }
 
     #[test]
