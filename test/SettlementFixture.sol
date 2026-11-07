@@ -9,21 +9,21 @@ library SettlementFixture {
     bytes32 internal constant OLD_ROOT = 0xcf3afdcb60f9f6f2a419a12c55f3fe37cb50967744368ceb8ffd5473cb341205;
     bytes32 internal constant NEW_ROOT = 0x07609152513fc6695e13dd4cc33f6c2603025d52ee6d31d78fb4d63c43c24228;
     bytes32 internal constant VUMT_ROOT = 0x67823d2f82e97539ee2559d7965aa4d41fe3c9493905233ea4041f87f724a001;
-    bytes32 internal constant BLOB_HASH = 0x01c2aa85618766d8ed9874639a5929771fc941a93a59f14b549bf030f9122bc4;
+    bytes32 internal constant BLOB_HASH = 0x01297d922b5a79b763bcff886f6c564a492fa0c2b7ea661488e23251d61739b1;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
     address internal constant SETTLEMENT = 0x2e234DAe75C793f67A35089C9d99245E1C58470b;
-    uint256 internal constant PUBLIC_INPUT = 0x0ffcdf5dd2d431c2ec6be68eeea27fa0ccc138684ebe55018875dc7514607cb7;
-    bytes32 internal constant BLOB_POINT = 0x2f6fa52973a85072c09ac268f449929124eed178e376aded067b6cd62d93ce37;
-    bytes internal constant KZG = hex"885d522a87dd6f21cf81c9ed3c7bb3d97f194851e441d547d75f75b3b62323f13f3d1541c4707fb34128fbb1ca9950ccb1b6812c8674154822f98231154b121f202d9a2bf2cf6a06ecdca85476c72ac220ee39a9bacdc16720785fe9a8256663";
+    uint256 internal constant PUBLIC_INPUT = 0x093f68315fa89546b673df171630f7ac5381fca8cbd603728086cb44c91b330d;
+    bytes32 internal constant BLOB_POINT = 0x0ee4356651ac7914fa203823915e4e7a7ca96ae0938d8bed397c5d2d0a3f6660;
+    bytes internal constant KZG = hex"a825c22ec30ac2a95bcdd11893aedf3417b8e099effaabfcd7a97d228bd38ec83a7a901248d045934fe3eb4d032418fa94ebf43fe8448f0cd75b3bc0bb14f30bf7db4a28fb39a5bb0ff28c26bb33f01fcf79794f44dcdc9b2c9bc185bd06b477";
 
     function blobValues() internal pure returns (bytes32[] memory v) {
         v = new bytes32[](1);
-        v[0] = 0x45f9ff44fbe8a6527dc6460c7793a29a94f7128444a004a34f8c3e54749c6efe;
+        v[0] = 0x5b24f376f2a52849b225aa172c313126aceddf9b1e8db3bbb46f1e3db9879100;
     }
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x0630477b20ebae070e32af63ac5e1215a745e7a522505cc5d672cf0a39cfdff9), uint256(0x12c48aa85dfd63d70a3ff95d4688a8801e86cc58a7b7593ccb6c3f6bebe9ad80)];
+        p = [uint256(0x2aab9572dcdf8598d71d5f6759bc507e3eff77159514887bfd6c6f2ddd665f64), uint256(0x00787e253dea602d3729df5f17020a112bfdcc0bc5f50f0e9808ce4a19f5dd14)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
@@ -31,6 +31,6 @@ library SettlementFixture {
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x28ec9ff291dd1c35d61a1f1b173f0503e4b89ce56b9d6c92b1d5ca1d3d77a689), uint256(0x13a7ad8011abbbd6b16677fdd6ff8e7358a018f986a67791e222ba9b47f39edb)];
+        p = [uint256(0x00b607471eed7f1ebc48ccd32c604c81ff46824124e3420b78a66d8f9e8a3532), uint256(0x195a42010356acdc86f1c1fed7c7dfcee1f5c421b66fc25eb52d4d332c111739)];
     }
 }

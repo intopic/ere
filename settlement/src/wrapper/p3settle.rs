@@ -125,17 +125,40 @@ fn stages(name: &str, cs: &Cs, t0: std::time::Instant) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Table {
+    Lane(usize),
+    Addr,
+}
+
+impl Table {
+    fn layout(self, shape: &crate::wrapper::statement_var::StatementShape) -> Vec<Vec<Cell>> {
+        match self {
+            Table::Lane(l) => p3_layout(shape, l),
+            Table::Addr => crate::wrapper::statement_var::p3_addr_layout(shape),
+        }
+    }
+    fn cols(self, stmt: &StatementVar) -> Vec<Vec<M31>> {
+        match self {
+            Table::Lane(l) => stmt.p3_public_cols(l),
+            Table::Addr => stmt.p3_addr_cols(),
+        }
+    }
+}
+
 /// Inline: the statement in the parent. Threads: parent slots for the digest, roots, limbs and
 /// every statement value a public table reads, filled by a child that builds `StatementVar`.
 fn statement<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement>, cs: &Cs, par: &Par<'s, 'e>) -> R<StmtOut> {
-    let lanes: Vec<Option<usize>> = shape.batch.inst.iter().map(|s| s.public_lane).collect();
+    // which statement table each instance's periodic columns are: a lane's public table or the
+    // address table (None: no periodic columns)
+    let tables: Vec<Option<Table>> = shape.batch.inst.iter().map(|s| if let Some(l) = s.public_lane { Some(Table::Lane(l)) } else if s.addr_table { Some(Table::Addr) } else { None }).collect();
     if par.is_inline() {
         let t0 = std::time::Instant::now();
         let stmt = StatementVar::witness(cs, st, shape.statement.clone())?;
         stages("statement", cs, t0);
         return Ok(StmtOut {
             limbs: stmt.digest_limbs()?,
-            cols: lanes.iter().map(|l| l.map(|l| stmt.p3_public_cols(l)).unwrap_or_default()).collect(),
+            cols: tables.iter().map(|t| t.map(|t| t.cols(&stmt)).unwrap_or_default()).collect(),
             digest: stmt.digest.clone(),
             old_root: stmt.old_root.clone(),
             new_root: stmt.new_root.clone(),
@@ -147,7 +170,7 @@ fn statement<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement
     let new_root = slot(cs, fr(StateStatement::new_root))?;
     let native_limbs = st.map(ss_rap_p3::state::digest_limbs);
     let limbs: Vec<FpVar<Fr>> = (0..ss_rap_p3::state::DIGEST_LIMBS).map(|k| slot(cs, native_limbs.as_ref().map(|l| Fr::from(l[k] as u64)))).collect::<R<_>>()?;
-    let layouts: Vec<Option<Vec<Vec<Cell>>>> = lanes.iter().map(|l| l.map(|l| p3_layout(&shape.statement, l))).collect();
+    let layouts: Vec<Option<Vec<Vec<Cell>>>> = tables.iter().map(|t| t.map(|t| t.layout(&shape.statement))).collect();
     let mut srcs: BTreeMap<Src, FpVar<Fr>> = BTreeMap::new();
     for c in layouts.iter().flatten().flatten().flatten() {
         if let Cell::Var(src, _) = c {
@@ -207,6 +230,14 @@ fn synth<'s, 'e: 's>(shape: &'e P3SettleShape, st: Option<&'e StateStatement>, p
     bind_header(cs, &x, &so.old_root, &so.new_root, &v_umt, header, &HeaderBlobBits { blobs_hash, evals })
 }
 
+/// Test and fixture helper: the blobs (bytes) of a statement's transfers, with made-up
+/// signatures, in the transaction-slot layout.
+#[doc(hidden)]
+pub fn tests_blob_bytes(st: &StateStatement) -> Vec<Vec<u8>> {
+    let txs: Vec<Vec<u8>> = st.lanes.iter().flatten().enumerate().map(|(g, t)| ss_rap_p3::tx_bind::encode_transfer(st, t, 0, &[(g as u8) ^ 0x5a; 65]).to_vec()).collect();
+    crate::blob::tx_blobs(&txs).expect("the transfers fit in the blobs")
+}
+
 /// The header of a batch proven with `blobs` (the blob point and values from its claim).
 #[allow(clippy::too_many_arguments)]
 pub fn header(st: &StateStatement, w: &BatchWitness, claim: &BlobClaim, blobs_hash: [u8; 32], batch_number: u64, domain: &crate::public_input::Domain) -> BatchHeader {
@@ -254,8 +285,7 @@ mod tests {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(40, 5);
         let p = Params { log_rows: 5, log_blowup: 1, queries: 4, budget: 3, query_pow: 8 };
-        let blob = crate::blob::to_blob(b"SS-RAP blob of the test batch").unwrap();
-        let (bi, bh) = blob_input(&[blob], 1).unwrap();
+        let (bi, bh) = blob_input(&tests_blob_bytes(&st), 1).unwrap();
         let (proof, ops, claim) = prove(&st, &traces, &bi, &p);
         let shape = P3SettleShape::new(&st, &p, &proof, &ops);
         let w = witness(&shape, &proof, &ops);

@@ -411,18 +411,29 @@ impl BlobClaim {
 #[derive(Clone, Debug)]
 pub struct BlobEvalAir {
     pub slots: usize,
+    /// every element also goes on the "elem" bus to `tx_bind::TxAir` (audit H-01 (b))
+    pub bind: bool,
 }
 
 impl BlobEvalAir {
+    /// The blob AIR alone (the claim about S and D only).
     pub fn new(slots: usize) -> Self {
         assert!(slots.is_power_of_two(), "blob slots must be a power of two");
-        Self { slots }
+        Self { slots, bind: false }
+    }
+    /// The blob AIR whose elements are bound to the executed transactions.
+    pub fn bound(slots: usize) -> Self {
+        Self { bind: true, ..Self::new(slots) }
     }
     /// log2 of the trace height.
     pub fn log_rows(&self) -> usize {
         LOG_ROWS + self.slots.trailing_zeros() as usize
     }
     fn pre_width(&self) -> usize {
+        PRE_LAST + self.slots + 1
+    }
+    /// the global element index (blob j, element i) -> 4096 j + i
+    fn pre_g(&self) -> usize {
         PRE_LAST + self.slots
     }
 }
@@ -443,6 +454,7 @@ impl<F: Field> BaseAir<F> for BlobEvalAir {
                 }
                 row[PRE_FIRST] = F::from_bool(i == 0);
                 row[PRE_LAST + j] = F::from_bool(i == ROWS - 1);
+                row[PRE_LAST + self.slots] = F::from_usize(j * ROWS + i);
             }
         }
         Some(RowMajorMatrix::new(v, pw))
@@ -566,6 +578,12 @@ where
         }
         for j in (0..BYTE_COLS).step_by(2) {
             builder.push_interaction("byte2", [c[j].clone(), c[j + 1].clone()], 1);
+        }
+        if self.bind {
+            // (g, the element's 31 data bytes in blob order: big-endian, e_30 first)
+            let mut t = vec![pc[self.pre_g()].clone()];
+            t.extend((0..B - 1).rev().map(|k| c[E + k].clone()));
+            builder.push_interaction("elem", t, 1);
         }
     }
 }

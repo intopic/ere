@@ -8,28 +8,28 @@ library StarkSettlementFixture {
     bytes32 internal constant OLD_ROOT = 0x8114dbf6aaf59106206f49e94a9306ad41c890e1445fff49d70fefbf6dae1f0d;
     bytes32 internal constant NEW_ROOT = 0xf303bb8cdc23b5d195163b1ba7abf6948f86bf769c262bbecb77aad7dfe83130;
     bytes32 internal constant VUMT_ROOT = 0x54430ff91ee135e6ecdeaf9075c9513b150309f9e789162328ae93b122d9df22;
-    bytes32 internal constant BLOB_HASH = 0x01366141cce5f29fca29ec49b6fbd7c6e09325f7f1d64190212fe80d35416a8c;
+    bytes32 internal constant BLOB_HASH = 0x01a634f9e7c14cdb71cdd7ce0239dff3fc17d042fcb11de2452ed551a966d108;
     uint256 internal constant BATCH = 1;
     uint256 internal constant CHAIN_ID = 31337;
     address internal constant SETTLEMENT = 0x2e234DAe75C793f67A35089C9d99245E1C58470b;
-    uint256 internal constant PUBLIC_INPUT = 0x1c4ac88c66c199e78eb0aa379201fdd10494cff9421b54481a2e9d4db87b799c;
-    bytes32 internal constant BLOB_POINT = 0x1e1e5d98e27b122fb65f846956a177ba6dfae427fad4c354c20377a2ef659905;
-    bytes internal constant KZG = hex"985d1aa55d7522d57a58e974cd6748c6ce6f9f3dbccf4f98bf659377f1e3368422e041e046a29d504c4075bc2c923f67b87cb2922718eda4acf3fe0f244e9739a02e778336aca209d8c9223c1c992005a78f01bfe48313544c070acfab5906b7";
+    uint256 internal constant PUBLIC_INPUT = 0x11629c1a199e6f3a0557f6eb8d51ab398f1f482101d86c1fe9927252bbc83551;
+    bytes32 internal constant BLOB_POINT = 0x10f5e24e162e20c5bbcdca0283471287c77171b690ac6846fda053a8a9f31b27;
+    bytes internal constant KZG = hex"b629f40b8b874b572336565714d7314889ce8cb9dc700b97abb40baedf1ddce673d146cffcc05c875e0c6f406c1a007683336b632328de6af45af06cc3b3597b35250a2d97c4bd3d00fa1ab44277525a2db34aa4c0d8b6f9d1d2563f82b80792";
 
     function blobValues() internal pure returns (bytes32[] memory v) {
         v = new bytes32[](1);
-        v[0] = 0x175d3b839848c3597efe23cd8da4c83ecbdc862c44d000e01ec1252fea64df2f;
+        v[0] = 0x501410f04e169b18a1f88854caadb3adf904de94d66dc2dd6dd2df825a21022b;
     }
 
     function a() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x0de41970e1bc0ec72f26b40a664b4378f79510db638e286b52bf3d290455d3fa), uint256(0x2bf47f00d463279db478baccad3ee879418ea4d35311eb3510c1c128d4830b5f)];
+        p = [uint256(0x23248a40f3a19e01fa1916cfcba927946389a5527f5ecc58ba39a163b3c3b0a8), uint256(0x0ac8b31518ce2b3bc7ea417bd41ccdb8d9c6652b725a75376e06c2e0347c07fd)];
     }
 
     function b() internal pure returns (uint256[2][2] memory p) {
-        p = [[uint256(0x1d8ab7d29d82b420a17f4bc5810781d2a5a2efdb2bc67c55645dd9b00a7a97bc), uint256(0x062e35867812a6a4bea8c2a8130386fbfebd4a75c353fc33830bc365fd1ba3a7)], [uint256(0x11289741e5b781927531e80c439a096a617a4a70da98da359e77d24ea3ff3bb5), uint256(0x1d54dd70accf33acd68683aad5f8dc4cc44eb6254f9989ef15933d67324d552b)]];
+        p = [[uint256(0x28e085d04a59e7eee8fb906d81859a0396b94667dcb8e12e79ed2da18a04faff), uint256(0x22d522cd34e3669d90f6b91aef4c84293091e1295bf8aaa6c95af331acac95e8)], [uint256(0x2ee70574fd9c31b81bbc2197fbc954a7f5f0294a09b631bbf6af8c203ff4877a), uint256(0x218faf0cc9939bd0469f4f72742b52b53509f41be0510cf9dcc0c5b1c6cb45a2)]];
     }
 
     function c() internal pure returns (uint256[2] memory p) {
-        p = [uint256(0x1ad9a2173d60320bad861a4daafb479090347b09748e8572301f0d9319dd1825), uint256(0x25f28b7a6078e4677e8a222694e83f91e34d18accec259401df8362e75b369f0)];
+        p = [uint256(0x1628b5001de5469e30aaf1d274436f680999922671eb7dfed6b3638160cae80d), uint256(0x15977c22c25a0b2337b202c891004facbdb8ad271fd39b3ed3b29aed16f2233e)];
     }
 }

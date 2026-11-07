@@ -149,7 +149,7 @@ pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], blobs: &BlobI
 /// Fiat-Shamir log of the verification.
 pub fn verify_one(st: &StateStatement, proof: &BatchProof<Config>, blobs: &BlobClaim, p: &Params) -> (bool, Vec<Op>) {
     let (cfg, log) = config(p.log_blowup, p.queries, p.query_pow);
-    let airs = all_airs::<F>(st, blobs.slots());
+    let airs = all_airs::<F>(st, p.log_rows, blobs.slots());
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p, blobs.slots()), &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     log.lock().unwrap().clear();
     let ok = verify_batch(&cfg, &airs, proof, &all_public_values(st, &airs, blobs), &pd.common).is_ok();
@@ -165,7 +165,7 @@ mod tests {
     fn recorded_verification_log() {
         let (st, traces) = crate::state::tests_case(1100, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let b = crate::state::tests_blobs();
+        let b = crate::state::tests_blobs(&st);
         let proof = prove_one(&st, &traces, &b, &p);
         let (ok, ops) = verify_one(&st, &proof, &b.claim(), &p);
         assert!(ok);

@@ -38,6 +38,61 @@ pub fn from_blobs(blobs: &[Vec<u8>]) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// Transaction slots of one blob (audit H-01 (b)): every transaction takes 4 field elements,
+/// 124 data bytes (its 118-byte encoding, then 6 zero bytes), so the proof can find transaction
+/// g of the batch at slot g; an empty slot is all zero (`ss_rap_p3::tx_bind`).
+pub const TXS_PER_BLOB: usize = ss_rap_p3::tx_bind::TXS_PER_BLOB;
+const SLOT: usize = ss_rap_p3::tx_bind::SLOT_BYTES;
+
+/// The blobs of a batch's encoded transactions (`Tx::encode`, `TX_BYTES` each) in the slot
+/// layout (at least one blob), or None if they need more than MAX_BLOBS.
+pub fn tx_blobs(txs: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let n = txs.len().div_ceil(TXS_PER_BLOB).max(1);
+    if n > MAX_BLOBS || txs.iter().any(|t| t.len() != ss_rap_p3::tx_bind::TX_BYTES) {
+        return None;
+    }
+    Some(
+        (0..n)
+            .map(|j| {
+                let mut blob = vec![0u8; BYTES_PER_BLOB];
+                for (k, t) in txs.iter().skip(j * TXS_PER_BLOB).take(TXS_PER_BLOB).enumerate() {
+                    let mut slot = [0u8; SLOT];
+                    slot[..t.len()].copy_from_slice(t);
+                    for (e, c) in slot.chunks(31).enumerate() {
+                        let at = (4 * k + e) * 32;
+                        blob[at + 1..at + 32].copy_from_slice(c);
+                    }
+                }
+                blob
+            })
+            .collect(),
+    )
+}
+
+/// The encoded transactions of blobs made by `tx_blobs`, in order, or None if they are not in
+/// that layout (a non-zero first byte or padding, or a transaction after an empty slot).
+pub fn txs_of_blobs(blobs: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut ended = false;
+    for b in blobs {
+        if b.len() != BYTES_PER_BLOB || b.chunks(32).any(|e| e[0] != 0) {
+            return None;
+        }
+        let data: Vec<u8> = b.chunks(32).flat_map(|e| e[1..].iter().copied()).collect();
+        for slot in data.chunks(SLOT) {
+            if slot.iter().all(|&x| x == 0) {
+                ended = true;
+                continue;
+            }
+            if ended || slot[ss_rap_p3::tx_bind::TX_BYTES..].iter().any(|&x| x != 0) {
+                return None;
+            }
+            out.push(slot[..ss_rap_p3::tx_bind::TX_BYTES].to_vec());
+        }
+    }
+    Some(out)
+}
+
 /// The blob hash the public input binds: the single versioned hash, or keccak256 of all of them.
 pub fn blobs_hash(versioned: &[[u8; 32]]) -> [u8; 32] {
     if versioned.len() == 1 {
@@ -98,6 +153,24 @@ pub fn versioned_hash(blob: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_slots_round_trip() {
+        let txs: Vec<Vec<u8>> = (0..TXS_PER_BLOB + 5).map(|i| (0..ss_rap_p3::tx_bind::TX_BYTES).map(|k| (i * 7 + k + 1) as u8).collect()).collect();
+        let blobs = tx_blobs(&txs).unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(txs_of_blobs(&blobs).unwrap(), txs);
+        // the proof's view: transaction g sits in slot g (4 elements of 31 bytes)
+        let e = crate::blob_eval::elements(&blobs[1]).unwrap();
+        assert_eq!(&ss_rap_p3::tx_bind::slot_bytes(&e, 2)[..ss_rap_p3::tx_bind::TX_BYTES], &txs[TXS_PER_BLOB + 2][..]);
+        let tx_arrays: Vec<[u8; ss_rap_p3::tx_bind::TX_BYTES]> = txs.iter().map(|t| t[..].try_into().unwrap()).collect();
+        assert_eq!(ss_rap_p3::tx_bind::blob_elements(&tx_arrays)[1], e);
+        assert_eq!(tx_blobs(&[]).unwrap().len(), 1);
+        assert!(tx_blobs(&vec![txs[0].clone(); TXS_PER_BLOB * MAX_BLOBS + 1]).is_none());
+        let mut bad = blobs.clone();
+        bad[0][(4 * 2 + 3) * 32 + 31] = 1; // the padding of slot 2 (its last element's last byte)
+        assert!(txs_of_blobs(&bad).is_none());
+    }
 
     #[test]
     fn packing_round_trips() {

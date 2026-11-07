@@ -36,10 +36,8 @@ fn main() {
     let (st, traces) = ss_rap_p3::state::tests_case(n_tx as u32, log_rows as u32);
     let p = Params { log_rows, log_blowup, queries, budget: 3, query_pow };
 
-    // one real blob (made-up bytes: the transfers are not yet linked to the blob, audit H-01
-    // part 5) in one slot
-    let data: Vec<u8> = (0..4000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
-    let blob = ss_rap_settlement::blob::to_blob(&data).unwrap();
+    // the batch's blob: its transfers, one per slot (made-up signatures: audit C-02 is open)
+    let blob = p3settle::tests_blob_bytes(&st).remove(0);
     let (blobs, blobs_hash) = p3settle::blob_input(std::slice::from_ref(&blob), 1).unwrap();
 
     let t0 = Instant::now();

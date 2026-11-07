@@ -63,17 +63,27 @@ vlerësimesh (rrënjët e njësisë në rend bit-reversed). Lidhja që ndërtojm
    Pas lehtësimit (pjesa 4): një identitet i vetëm `u·d + q2·P = e·w + q1·P` me një grup
    carry-sh, bajtet kontrollohen dy nga dy në busin "byte2" (`BytePairTableAir`, 2^16 rreshta),
    815 kolona. Disa blob-e (slot-e) hyjnë në një instancë; slot-i bosh jep `S = 0`.
-5. **Lidhja me ekzekutimin:** një bus nga rreshtat e transaksioneve te bajtet e blob-it (pozicioni,
-   vlera), sipas formatit kanonik `Tx::encode`.
+5. **Lidhja me ekzekutimin** (`p3/src/tx_bind.rs`, gati): formati i blob-it ka një slot për
+   transaksion, 4 elemente (124 bajte: 118 bajtet e `Tx::encode` dhe 6 zero), 1 024 slot-e për
+   blob. Transaksioni g i batch-it është te slot-i g dhe ekzekutohet te korsia g / 2^log_rows,
+   rreshti g mod 2^log_rows. `TxAir` ka një rresht për slot. Merr 4 elementet e slot-it nga
+   `BlobEvalAir` (busi "elem": çdo element i çdo blob-i konsumohet një herë). Një slot joaktiv
+   duhet të jetë krejt zero. Një slot aktiv i dërgon korsisë (korsia, t, id e dërguesit, id e
+   marrësit, shuma, nonce) në busin "tx", dhe çdo rresht aktiv i korsisë e merr. Adresat
+   lidhen me id-të përmes tabelës publike të adresave (`AddrAir`, kolona periodike nga
+   statement-i, që qarku Groth16 i nxjerr nga bajtet e adresave). Testi
+   `the_blob_holds_exactly_the_executed_transfers` refuzon: një shumë tjetër, një marrës tjetër,
+   dy transaksione të ndërruara, një transaksion që mungon, një transaksion shtesë dhe një slot
+   të fikur që mban bajte. Bajtet e nënshkrimit mbarten, por nuk kontrollohen ende (C-02).
 6. **L1:** `z` dhe `y_j` hyjnë në hash-in e header-it; kontrata thërret 0x0a për çdo blob
    (~50k gas për blob).
 
 **Kostoja në Groth16** (forma e CI-së, 40 tx, 1 blob): 2,17M kufizime para blob-it, 6,6M me
-AIR-in e parë, **2,96M** pas lehtësimit. Pjesa më e madhe e fitimit vjen nga verifikuesi në R1CS
+AIR-in e parë, 2,96M pas lehtësimit, **3,20M** me lidhjen e transaksioneve (pika 5). Pjesa më e madhe e fitimit vjen nga verifikuesi në R1CS
 dhe vlen për gjithë qarkun: shumëzimet lihen të pareduktuara kur kufiri e lejon, shprehjet
 lineare (shtresat lineare të Poseidon2) nuk kushtojnë asgjë, palosja e kufizimeve me alpha bëhet
 në dy nivele (një reduktim për 32 kufizime) dhe shkalla e fuqive të alpha në PCS gjithashtu.
-Gjenerimi i fixture-it (setup + provë Groth16) arrin ~12,8 GB kujtesë; prova vetë ~19 s.
+Gjenerimi i fixture-it (setup + provë Groth16) arrin ~14 GB kujtesë; prova vetë ~19 s.
 
 Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet ≤ 4096/r_bls ≈ 2^-243.
 
@@ -81,7 +91,7 @@ Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet 
 
 | Gjetja | Gjendja |
 |---|---|
-| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (1–4 dhe 6 gati: blob-i lidhet me L1; mbetet 5, lidhja me transaksionet) |
+| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | e mbyllur në kod (1–6); nënshkrimet mbeten te C-02 |
 | C-02 ECDSA brenda provës | hapur (hapi 4) |
 | C-01 Ceremonia e çelësave | e shtyrë me vendim: bëhet pasi qarku të ngrihet |
 | M-01, M-02, M-05, M-06, I-01 | jo në rrugën e settlement-it; të paprekura |

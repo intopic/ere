@@ -158,6 +158,8 @@ pub struct InstShape {
     pub public_lane: Option<usize>,
     /// the blob AIR (whose public values are the blob claim)
     pub blob: bool,
+    /// the address table (whose periodic columns come from the statement's addresses)
+    pub addr_table: bool,
     pub bus: Vec<usize>,
 }
 
@@ -185,7 +187,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
     let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
     let pcs = cfg.pcs();
     let slots = 1usize << (degree_bits[degree_bits.len() - 1] - ss_rap_p3::blob_eval::LOG_ROWS);
-    let airs = all_airs::<F>(st, slots);
+    let airs = all_airs::<F>(st, p.log_rows, slots);
     assert_eq!(airs.len(), degree_bits.len(), "a proof of another shape");
     let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, degree_bits, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     let lookups = &pd.common.lookups;
@@ -236,6 +238,7 @@ pub fn batch_shape(st: &StateStatement, p: &Params, degree_bits: &[usize], ops: 
             periodic: air.periodic_columns().iter().map(|c| c.iter().map(|v| v.as_canonical_u32()).collect()).collect(),
             public_lane: if let ss_rap_p3::state::LaneAirs::Public(a) = air { Some(a.lane as usize) } else { None },
             blob: matches!(air, ss_rap_p3::state::LaneAirs::Blob(_)),
+            addr_table: matches!(air, ss_rap_p3::state::LaneAirs::Addr(_)),
             bus,
         });
     }
@@ -798,7 +801,7 @@ mod tests {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 6, budget: 3, query_pow: 0 };
-        let blobs = ss_rap_p3::state::tests_blobs();
+        let blobs = ss_rap_p3::state::tests_blobs(&st);
         let claim = blobs.claim();
         let proof = record::prove_one(&st, &traces, &blobs, &p);
         let (ok, ops) = record::verify_one(&st, &proof, &claim, &p);

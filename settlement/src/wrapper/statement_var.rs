@@ -76,6 +76,7 @@ struct TxVar {
 pub struct StatementVar {
     pub shape: StatementShape,
     addrs: Vec<FpVar<Fr>>,
+    addr_limbs: Vec<Vec<FpVar<Fr>>>,
     states: Vec<Vec<AccountVar>>,
     final_ts: Vec<Vec<Int>>,
     lanes: Vec<Vec<TxVar>>,
@@ -140,6 +141,8 @@ pub enum Src {
     TxNonce(usize, usize),
     /// amount byte `k` of transfer `j` in lane `l`
     Amt(usize, usize, usize),
+    /// limb `l` of the address of account `id` (`ss_rap_p3::tx_bind::addr_limb_values`)
+    AddrLimb(usize, usize),
 }
 
 /// A cell of a public table: a constant of the shape, or a statement value of at most `bits` bits.
@@ -173,6 +176,23 @@ pub fn p3_layout(shape: &StatementShape, lane: usize) -> Vec<Vec<Cell>> {
     (0..12).map(|j| rows.iter().map(|r| r[j]).collect()).collect()
 }
 
+/// The columns of `ss_rap_p3::tx_bind::AddrAir::new(st)` for any statement of shape `shape`:
+/// (valid, id, address limbs) per account, padded with zero rows to `addr_rows`.
+pub fn p3_addr_layout(shape: &StatementShape) -> Vec<Vec<Cell>> {
+    use ss_rap_p3::tx_bind::{addr_rows, ADDR_LIMBS};
+    let n = addr_rows(shape.accounts);
+    let w = 2 + ADDR_LIMBS;
+    let mut rows = vec![vec![Cell::Const(0); w]; n];
+    for (id, r) in rows.iter_mut().enumerate().take(shape.accounts) {
+        r[0] = Cell::Const(1);
+        r[1] = Cell::Const(id as u32);
+        for l in 0..ADDR_LIMBS {
+            r[2 + l] = Cell::Var(Src::AddrLimb(id, l), if l + 1 < ADDR_LIMBS { 24 } else { 16 });
+        }
+    }
+    (0..w).map(|j| rows.iter().map(|r| r[j]).collect()).collect()
+}
+
 /// The value of a cell's source in `st`.
 pub fn src_value(st: &StateStatement, s: Src) -> u64 {
     match s {
@@ -183,6 +203,7 @@ pub fn src_value(st: &StateStatement, s: Src) -> u64 {
         Src::To(l, j) => st.lanes[l][j].to as u64,
         Src::TxNonce(l, j) => st.lanes[l][j].nonce as u64,
         Src::Amt(l, j, k) => (st.lanes[l][j].amount >> (8 * k)) & 0xff,
+        Src::AddrLimb(id, l) => ss_rap_p3::tx_bind::addr_limb_values(&st.addrs[id])[l] as u64,
     }
 }
 
@@ -197,10 +218,16 @@ impl StatementVar {
         }
         let n_rows = 1u64 << shape.log_rows;
         assert!(shape.lane_txs.iter().all(|&l| l as u64 <= n_rows));
-        // addresses: 160 bits, strictly increasing
-        let addrs: Vec<FpVar<Fr>> = (0..k)
-            .map(|i| range_witness(cs, st.map(|st| BigUint::from_bytes_be(&st.addrs[i])), 160))
+        // addresses: 20 bytes each (big-endian), strictly increasing; the bytes also give the
+        // limbs of the address table (`ss_rap_p3::tx_bind::AddrAir`)
+        let addr_bytes: Vec<Vec<FpVar<Fr>>> = (0..k)
+            .map(|i| (0..20).map(|b| range_witness(cs, st.map(|st| BigUint::from(st.addrs[i][b])), 8)).collect::<R<Vec<_>>>())
             .collect::<R<_>>()?;
+        let addrs: Vec<FpVar<Fr>> = addr_bytes.iter().map(|b| b.iter().fold(FpVar::zero(), |acc, x| acc * Fr::from(256u64) + x)).collect();
+        let addr_limbs: Vec<Vec<FpVar<Fr>>> = addr_bytes
+            .iter()
+            .map(|b| (0..ss_rap_p3::tx_bind::ADDR_LIMBS).map(|l| (0..3).filter(|t| 3 * l + t < 20).fold(FpVar::zero(), |acc, t| acc + &b[3 * l + t] * Fr::from(1u64 << (8 * t)))).collect())
+            .collect();
         for i in 1..k {
             let d = range_witness(
                 cs,
@@ -251,7 +278,7 @@ impl StatementVar {
         let digest = poseidon(cs, &el)?;
         let old_root = root(cs, &addrs, &states[0])?;
         let new_root = root(cs, &addrs, &states[DEFAULT_RNS_CHANNELS])?;
-        Ok(Self { shape, addrs, states, final_ts, lanes, digest, old_root, new_root })
+        Ok(Self { shape, addrs, addr_limbs, states, final_ts, lanes, digest, old_root, new_root })
     }
 
     /// The public tuples of lane `ch`, as `StateAir::public_tuples`.
@@ -281,7 +308,16 @@ impl StatementVar {
     /// The periodic columns of `ss_rap_p3::state::PublicAir::new(st, lane)` (BabyBear), see
     /// `p3_layout`.
     pub fn p3_public_cols(&self, lane: usize) -> Vec<Vec<M31>> {
-        p3_layout(&self.shape, lane)
+        self.cols(&p3_layout(&self.shape, lane))
+    }
+
+    /// The columns of the address table (`p3_addr_layout`) as circuit values.
+    pub fn p3_addr_cols(&self) -> Vec<Vec<M31>> {
+        self.cols(&p3_addr_layout(&self.shape))
+    }
+
+    fn cols(&self, layout: &[Vec<Cell>]) -> Vec<Vec<M31>> {
+        layout
             .iter()
             .map(|c| {
                 c.iter()
@@ -304,6 +340,7 @@ impl StatementVar {
             Src::To(l, j) => &self.lanes[l][j].to.v,
             Src::TxNonce(l, j) => &self.lanes[l][j].nonce.v,
             Src::Amt(l, j, k) => &self.lanes[l][j].bytes[k].v,
+            Src::AddrLimb(id, l) => &self.addr_limbs[id][l],
         }
     }
 

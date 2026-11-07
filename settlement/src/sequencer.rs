@@ -178,6 +178,15 @@ impl SealedBatch {
     pub fn blob_data(&self) -> Vec<u8> {
         self.txs.iter().flat_map(|t| t.encode()).collect()
     }
+    /// The blobs carrying the batch (one transaction per slot, `crate::blob::tx_blobs`), or None
+    /// if it needs more than `MAX_BLOBS`.
+    pub fn blobs(&self) -> Option<Vec<Vec<u8>>> {
+        crate::blob::tx_blobs(&self.txs.iter().map(|t| t.encode()).collect::<Vec<_>>())
+    }
+    /// The transactions carried by `blobs`, or None if they are malformed.
+    pub fn decode_blobs(blobs: &[Vec<u8>]) -> Option<Vec<Tx>> {
+        crate::blob::txs_of_blobs(blobs)?.iter().map(|t| Tx::decode(t)).collect()
+    }
     /// The transactions as transfers between indices of `addrs`.
     /// The transactions of a blob (`blob_data`), or None if it is malformed.
     pub fn decode_blob(blob: &[u8]) -> Option<Vec<Tx>> {
@@ -407,5 +416,7 @@ mod tests {
         // 1000 transfers fit in one blob (4096 field elements x 31 usable bytes)
         assert!(1000 * TX_BYTES <= 4096 * 31);
         assert!(SealedBatch::decode_blob(&blob[1..]).is_none());
+        // the blobs as posted: one transaction per 4-element slot
+        assert_eq!(SealedBatch::decode_blobs(&b.blobs().unwrap()).unwrap(), b.txs);
     }
 }

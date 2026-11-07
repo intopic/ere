@@ -506,7 +506,7 @@ mod tests {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let blobs = ss_rap_p3::state::tests_blobs();
+        let blobs = ss_rap_p3::state::tests_blobs(&st);
         let claim = blobs.claim();
         let proof = record::prove_one(&st, &traces, &blobs, &p);
         let (ok, ops) = record::verify_one(&st, &proof, &claim, &p);
@@ -516,7 +516,7 @@ mod tests {
         let (la, lb, alpha, zeta) = (e(0), e(4), e(8), e(12));
 
         let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
-        let airs = all_airs::<F>(&st, claim.slots());
+        let airs = all_airs::<F>(&st, p.log_rows, claim.slots());
         let pvs = ss_rap_p3::state::all_public_values::<F>(&st, &airs, &claim);
         let degs: Vec<usize> = proof.degree_bits.clone();
         let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();

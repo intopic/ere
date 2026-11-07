@@ -4,6 +4,7 @@
 pub mod bn254;
 pub mod config;
 pub mod blob_eval;
+pub mod tx_bind;
 pub mod poseidon2_24;
 pub mod mulmod;
 pub mod state;

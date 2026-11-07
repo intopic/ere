@@ -81,10 +81,10 @@ pub struct SettlementPackage {
     pub blob_kzg: Vec<u8>,
 }
 
-/// The blob hash of `data` (the batch's `blob_data`): the versioned hash of its blob, or, when it
-/// takes several blobs, keccak256 of their versioned hashes (`crate::blob::blobs_hash`).
-pub fn blob_versioned_hash(data: &[u8]) -> Result<[u8; 32], PipelineError> {
-    let blobs = crate::blob::to_blobs(data).ok_or(PipelineError::BlobTooLarge)?;
+/// The blob hash of a batch: the versioned hash of its blob, or, when it takes several blobs,
+/// keccak256 of their versioned hashes (`crate::blob::blobs_hash`).
+pub fn blob_versioned_hash(batch: &SealedBatch) -> Result<[u8; 32], PipelineError> {
+    let blobs = batch.blobs().ok_or(PipelineError::BlobTooLarge)?;
     let hashes: Vec<[u8; 32]> = blobs.iter().map(|b| crate::blob::versioned_hash(b)).collect();
     Ok(crate::blob::blobs_hash(&hashes))
 }
@@ -211,7 +211,7 @@ pub fn settle_with(
         old_state_root: batch.old_state_root,
         new_state_root: batch.new_state_root,
         v_umt_root: v_umt_root(&st, &stark_proof),
-        blob_versioned_hash: blob_versioned_hash(&batch.blob_data())?,
+        blob_versioned_hash: blob_versioned_hash(batch)?,
         batch_number: batch.batch_number,
         chain_id: cfg.domain.chain_id,
         settlement: cfg.domain.settlement,
@@ -257,13 +257,13 @@ pub fn settle_with(
 
 /// The batch's blobs as the STARK's blob input (in `slots` slots), and their blobs hash.
 pub fn batch_blobs(batch: &SealedBatch, slots: usize) -> Result<(ss_rap_p3::blob_eval::BlobInput, [u8; 32]), PipelineError> {
-    let blobs = crate::blob::to_blobs(&batch.blob_data()).ok_or(PipelineError::BlobTooLarge)?;
+    let blobs = batch.blobs().ok_or(PipelineError::BlobTooLarge)?;
     p3settle::blob_input(&blobs, slots).ok_or(PipelineError::BlobTooLarge)
 }
 
 /// The KZG commitment and opening proof at `z` of each of the batch's blobs.
 pub fn batch_kzg(batch: &SealedBatch, z: &[u8; 32]) -> Result<Vec<u8>, PipelineError> {
-    let blobs = crate::blob::to_blobs(&batch.blob_data()).ok_or(PipelineError::BlobTooLarge)?;
+    let blobs = batch.blobs().ok_or(PipelineError::BlobTooLarge)?;
     let mut v = Vec::with_capacity(96 * blobs.len());
     for b in &blobs {
         v.extend_from_slice(&crate::blob_eval::point_evaluation_input(b, z).ok_or(PipelineError::BlobTooLarge)?[96..]);
@@ -301,7 +301,7 @@ fn settle_p3(
     }
     let w = p3settle::witness(&prover.shape, &proof, &ops);
     let header = p3settle::header(&st, &w, &claim, blobs_hash, batch.batch_number, &cfg.domain);
-    debug_assert_eq!(header.blob_versioned_hash, blob_versioned_hash(&batch.blob_data())?);
+    debug_assert_eq!(header.blob_versioned_hash, blob_versioned_hash(batch)?);
     let x = header.public_input();
     let t0 = Instant::now();
     let z = p3settle::witness_parallel(&prover.shape, &st, &w, &claim, &header).map_err(|_| PipelineError::Groth16Rejected)?;

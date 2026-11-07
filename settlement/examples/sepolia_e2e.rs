@@ -58,7 +58,7 @@ fn main() {
     let batch = fill(&mut seq);
     // blob slots of the shape: E2E_BLOB_SLOTS, or the first batch's blobs (rounded up)
     let blob_slots: usize = std::env::var("E2E_BLOB_SLOTS").ok().map(|v| v.parse().expect("E2E_BLOB_SLOTS"))
-        .unwrap_or_else(|| blob::to_blobs(&batch.blob_data()).expect("blobs").len().next_power_of_two());
+        .unwrap_or_else(|| batch.blobs().expect("blobs").len().next_power_of_two());
     std::fs::write(out.join("slots.txt"), format!("{blob_slots}\n")).unwrap();
 
     let t0 = Instant::now();
@@ -86,7 +86,7 @@ fn main() {
         let suffix = if i == 0 { String::new() } else { format!("{}", i + 1) };
         let pkg = settle_with(batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default(), &mut rand_core::OsRng).expect("pipeline");
         let h = &pkg.header;
-        let blobs = blob::to_blobs(&batch.blob_data()).unwrap();
+        let blobs = batch.blobs().unwrap();
         let hashes: Vec<[u8; 32]> = blobs.iter().map(|b| blob::versioned_hash(b)).collect();
         assert_eq!(blob::blobs_hash(&hashes), h.blob_versioned_hash);
         let mut files = Vec::new();

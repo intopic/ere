@@ -41,7 +41,7 @@ fn main() {
     // all 5 lanes in ONE proof (what the Groth16 circuit verifies), incl. the circuit-friendly 16 x 25
     for (lb, q) in [(log_blowup, queries), (2, 50), (3, 34), (4, 25)] {
         let p1 = Params { log_blowup: lb, queries: q, ..p };
-        let blobs = ss_rap_p3::state::tests_blobs();
+        let blobs = ss_rap_p3::state::tests_blobs(&st);
         let claim = blobs.claim();
         let t0 = Instant::now();
         let pr = keccak::prove_one(&st, &traces, &blobs, &p1);
