@@ -25,16 +25,19 @@ contract P3SettlementTest {
     SSRapSettlementVerifierV2 internal settlement;
     P3WrapperVerifier internal groth16;
 
+    /// The transaction's blob hashes; set on every call, since newer forge does not keep
+    /// blobhashes from setUp in the test.
+    bytes32[] internal blobSet;
+
     function setUp() public {
         groth16 = new P3WrapperVerifier();
         settlement = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)));
         vm.chainId(F.CHAIN_ID);
-        bytes32[] memory blobs = new bytes32[](1);
-        blobs[0] = F.BLOB_HASH;
-        vm.blobhashes(blobs);
+        blobSet.push(F.BLOB_HASH);
     }
 
     function _settle(bytes32 newRoot, bytes32 vUmt, uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) internal {
+        vm.blobhashes(blobSet);
         vm.prank(AGG);
         settlement.verifyAndSettleBatchV2(F.OLD_ROOT, newRoot, vUmt, F.BATCH, a, b, c);
     }

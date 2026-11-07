@@ -26,16 +26,19 @@ contract SSRapSettlementTest {
     SSRapSettlementVerifierV2 internal settlement;
     Groth16Verifier internal groth16;
 
+    /// The transaction's blob hashes; set on every call, since newer forge does not keep
+    /// blobhashes from setUp in the test.
+    bytes32[] internal blobSet;
+
     function setUp() public {
         groth16 = new Groth16Verifier();
         settlement = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)));
         vm.chainId(F.CHAIN_ID);
-        bytes32[] memory blobs = new bytes32[](1);
-        blobs[0] = F.BLOB_HASH;
-        vm.blobhashes(blobs);
+        blobSet.push(F.BLOB_HASH);
     }
 
     function _settle(bytes32 newRoot, uint256 batch, uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) internal {
+        vm.blobhashes(blobSet);
         vm.prank(AGG);
         settlement.verifyAndSettleBatchV2(F.OLD_ROOT, newRoot, F.VUMT_ROOT, batch, a, b, c);
     }
@@ -78,6 +81,7 @@ contract SSRapSettlementTest {
     function test_rejectsOtherBlob() public {
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = bytes32(uint256(F.BLOB_HASH) ^ 1);
+        blobSet = blobs;
         vm.blobhashes(blobs);
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
@@ -88,6 +92,7 @@ contract SSRapSettlementTest {
         blobs[0] = F.BLOB_HASH;
         blobs[1] = bytes32(uint256(2));
         blobs[2] = bytes32(uint256(3));
+        blobSet = blobs;
         vm.blobhashes(blobs);
         require(settlement.blobsHash() == keccak256(abi.encodePacked(blobs[0], blobs[1], blobs[2])), "blobs hash");
         // the fixture proof binds the single blob, so an extra blob changes the statement
@@ -96,7 +101,7 @@ contract SSRapSettlementTest {
     }
 
     function test_rejectsMissingBlob() public {
-        vm.blobhashes(new bytes32[](0));
+        delete blobSet;
         vm.expectRevert(SSRapSettlementVerifierV2.MissingEip4844Blob.selector);
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
@@ -113,6 +118,7 @@ contract SSRapSettlementTest {
     }
 
     function test_rejectsWrongOldRoot() public {
+        vm.blobhashes(blobSet);
         vm.prank(AGG);
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidStateTransition.selector);
         settlement.verifyAndSettleBatchV2(bytes32(0), F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, F.a(), F.b(), F.c());
@@ -125,6 +131,7 @@ contract SSRapSettlementTest {
     }
 
     function test_rejectsUnauthorizedAggregator() public {
+        vm.blobhashes(blobSet);
         vm.expectRevert(SSRapSettlementVerifierV2.UnauthorizedAggregator.selector);
         settlement.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
