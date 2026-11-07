@@ -26,8 +26,7 @@ fn small_batch_through_the_plonky3_circuit() {
     assert!(matches!(P3Prover::new(&batch, p, Profile::Production), Err(PipelineError::InsecureParams { bits: 5 })));
     let prover = P3Prover::new(&batch, p, Profile::Development).unwrap();
     let (pk, vk) = prover.dev_keys();
-    let mut rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(1);
-    let mut rng: rand_chacha::ChaCha20Rng = rng;
+    let mut rng: rand_chacha::ChaCha20Rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(1);
     let cfg = PipelineConfig::default();
     let pkg = settle_with(&batch, &pk, &vk, Wrapper::P3(&prover), &cfg, &FeeSchedule::default(), &CostModel::default(), &mut rng).unwrap();
     assert_eq!(pkg.header.new_state_root, batch.new_state_root);

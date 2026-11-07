@@ -4,6 +4,7 @@
 pub mod bn254;
 pub mod config;
 pub mod blob_eval;
+pub mod poseidon2_24;
 pub mod mulmod;
 pub mod state;
 pub mod record;

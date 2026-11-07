@@ -153,7 +153,7 @@ mod tests {
         let blob = crate::blob::to_blob(&data).unwrap();
         let z = BigUint::from_bytes_be(&crate::public_input::keccak256(b"z")) % modulus();
         let e = ss_rap_p3::blob_eval::elements(&blob).unwrap();
-        let (_, s) = ss_rap_p3::blob_eval::trace::<p3_baby_bear::BabyBear>(&e, &z);
+        let (_, s, _) = ss_rap_p3::blob_eval::trace::<p3_baby_bear::BabyBear>(&e, &z);
         let y = ss_rap_p3::blob_eval::value_from_sum(&s, &z);
         assert_eq!(be32(&y), kzg_y(&blob, &be32(&z)));
     }

@@ -48,8 +48,11 @@ vlerësimesh (rrënjët e njësisë në rend bit-reversed). Lidhja që ndërtojm
 
 1. **Referenca native** (`settlement/src/blob_eval.rs`, gati): `p_blob(z)` nga bajtet e blob-it me
    formulën baricentrike të EIP-4844, e testuar kundrejt c-kzg, dhe hyrja 192-bajtëshe e 0x0a.
-2. **Angazhimi i elementeve:** STARK-u mban elementet e blob-it si bajte dhe i thith në një
-   sponge Poseidon2-BabyBear; digest-i `D` del si vlerë publike (O(1) për Groth16).
+2. **Angazhimi i elementeve** (gati, brenda `BlobEvalAir`): një sponge Poseidon2-BabyBear me gjerësi
+   24 (`p3/src/poseidon2_24.rs`, i njëjti permutacion si `default_babybear_poseidon2_24`), rate 16 dhe
+   capacity 8, një permutacion për rresht: çdo element (31 bajte) hyn si 11 vlera me nga 3 bajte.
+   Digest-i `D` (8 elemente BabyBear, ~124 bit kundër përplasjeve) del si vlerë publike, O(1) për
+   Groth16. AIR-i ka tani 1 034 kolona.
 3. **Pika:** `z = H(D, versioned hashes) mod r_bls`, e llogaritur në qarkun Groth16. Prover-i nuk
    mund ta zgjedhë `z` para se të fiksojë elementet.
 4. **Vlerësimi brenda STARK-ut** (`p3/src/blob_eval.rs`, gati si AIR më vete): me AIR-in MULMOD (moduli BLS12-381), për çdo element
@@ -68,7 +71,7 @@ Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet 
 
 | Gjetja | Gjendja |
 |---|---|
-| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (pjesët 1 dhe 4 gati) |
+| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (pjesët 1, 2 dhe 4 gati) |
 | C-02 ECDSA brenda provës | hapur (hapi 4) |
 | C-01 Ceremonia e çelësave | e shtyrë me vendim: bëhet pasi qarku të ngrihet |
 | M-01, M-02, M-05, M-06, I-01 | jo në rrugën e settlement-it; të paprekura |

@@ -28,13 +28,20 @@
 //!
 //! with `acc = u` on the first row and `acc = S` on the last. R, u and acc need not be
 //! canonical: only their values mod P matter, and the bounds keep every quotient in 32 bytes.
+//!
+//! The elements are also committed: a Poseidon2-BabyBear (width 24) sponge absorbs row i's
+//! element (31 bytes as 11 values of 3 bytes) in one permutation per row, and the digest D of
+//! the last row is the third public value. The point z must be derived from D (and the blob's
+//! versioned hash) outside the STARK, so the prover fixes the elements before it learns z.
 
 use num_bigint::BigUint;
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_field::{Field, PrimeCharacteristicRing, PrimeField32};
 use p3_lookup::InteractionBuilder;
 use p3_matrix::dense::RowMajorMatrix;
 use std::sync::OnceLock;
+
+use crate::poseidon2_24;
 
 /// Field elements (rows) per blob.
 pub const LOG_ROWS: usize = 12;
@@ -61,9 +68,22 @@ const AA: usize = AD + B - 1;
 const KD: usize = AA + B - 1;
 const KA0: usize = KD + 1;
 const KA1: usize = KA0 + 1;
-pub const WIDTH: usize = KA1 + 1;
-/// Public values: z (32 bytes) then S (32 bytes).
-pub const PUBLIC_VALUES: usize = 2 * B;
+/// Columns that hold bytes (all on the "byte" bus).
+const BYTE_COLS: usize = KA1 + 1;
+// the commitment: the capacity this row's permutation starts from, then the permutation
+const CAP: usize = BYTE_COLS;
+const P2: usize = CAP + CAPACITY;
+pub const WIDTH: usize = P2 + poseidon2_24::COLS;
+/// Poseidon2-24 sponge over the elements: rate 16 (11 used, 3 bytes per BabyBear element),
+/// capacity 8, one permutation per row, overwrite mode.
+const RATE: usize = 16;
+const CAPACITY: usize = poseidon2_24::T - RATE;
+/// Felts of the digest of the blob's elements.
+pub const DIGEST: usize = 8;
+/// Domain tag in the first capacity element ("BLOB").
+const TAG: u32 = 0x424c_4f42;
+/// Public values: z (32 bytes), S (32 bytes), then the digest D of the elements (8 BabyBear).
+pub const PUBLIC_VALUES: usize = 2 * B + DIGEST;
 
 /// BLS12-381 scalar field modulus.
 pub fn modulus() -> &'static BigUint {
@@ -175,8 +195,21 @@ fn add_carries(terms: &[(i64, [u8; B])]) -> [u8; B - 1] {
     out
 }
 
-/// The trace of one blob at `z` and the sum S it proves.
-pub fn trace<F: Field>(e: &[BigUint], z: &BigUint) -> (RowMajorMatrix<F>, BigUint) {
+/// Native digest of a blob's elements (the same sponge as the AIR).
+pub fn digest<F: PrimeField32>(e: &[BigUint]) -> [F; DIGEST] {
+    let mut cols = vec![F::ZERO; poseidon2_24::COLS];
+    let mut cap: Vec<F> = (0..CAPACITY).map(|k| F::from_u32(if k == 0 { TAG } else { 0 })).collect();
+    let mut out = [F::ZERO; poseidon2_24::T];
+    for x in e {
+        let eb: Vec<F> = le32(x).iter().map(|&b| F::from_u32(b as u32)).collect();
+        out = poseidon2_24::generate(absorb(&eb, &cap), &mut cols);
+        cap = out[RATE..].to_vec();
+    }
+    core::array::from_fn(|k| out[k])
+}
+
+/// The trace of one blob at `z`, the sum S it proves and the digest D of its elements.
+pub fn trace<F: PrimeField32>(e: &[BigUint], z: &BigUint) -> (RowMajorMatrix<F>, BigUint, [F; DIGEST]) {
     assert_eq!(e.len(), ROWS);
     let p = modulus();
     let pb = modulus_bytes();
@@ -184,6 +217,8 @@ pub fn trace<F: Field>(e: &[BigUint], z: &BigUint) -> (RowMajorMatrix<F>, BigUin
     let zb = le32(z);
     let mut v = F::zero_vec(ROWS * WIDTH);
     let mut acc = BigUint::from(0u32);
+    let mut cap: Vec<F> = (0..CAPACITY).map(|k| F::from_u32(if k == 0 { TAG } else { 0 })).collect();
+    let mut sponge = [F::ZERO; poseidon2_24::T];
     for i in 0..ROWS {
         let row = &mut v[i * WIDTH..(i + 1) * WIDTH];
         let put = |row: &mut [F], at: usize, bytes: &[u8]| {
@@ -246,19 +281,26 @@ pub fn trace<F: Field>(e: &[BigUint], z: &BigUint) -> (RowMajorMatrix<F>, BigUin
         row[KA0] = F::from_u32(ka & 1);
         row[KA1] = F::from_u32(ka >> 1);
         acc = next;
+        // the commitment
+        row[CAP..CAP + CAPACITY].copy_from_slice(&cap);
+        let input = absorb(&row[E..E + B], &cap);
+        sponge = poseidon2_24::generate(input, &mut row[P2..P2 + poseidon2_24::COLS]);
+        cap = sponge[RATE..].to_vec();
     }
-    (RowMajorMatrix::new(v, WIDTH), acc)
+    (RowMajorMatrix::new(v, WIDTH), acc, core::array::from_fn(|k| sponge[k]))
 }
 
 /// Public values of the instance: z then S, one byte each.
-pub fn public_values<F: Field>(z: &BigUint, s: &BigUint) -> Vec<F> {
-    le32(z).iter().chain(le32(s).iter()).map(|&b| F::from_u32(b as u32)).collect()
+pub fn public_values<F: Field>(z: &BigUint, s: &BigUint, d: &[F; DIGEST]) -> Vec<F> {
+    le32(z).iter().chain(le32(s).iter()).map(|&b| F::from_u32(b as u32)).chain(d.iter().copied()).collect()
 }
 
 /// Byte counts of a trace (for the shared `ByteTableAir`).
 pub fn byte_counts<F: Field + p3_field::PrimeField32>(t: &RowMajorMatrix<F>, m: &mut [u64; 256]) {
-    for x in t.values.iter() {
-        m[x.as_canonical_u32() as usize] += 1;
+    for row in t.values.chunks(WIDTH) {
+        for x in &row[..BYTE_COLS] {
+            m[x.as_canonical_u32() as usize] += 1;
+        }
     }
 }
 
@@ -279,6 +321,19 @@ impl<F: Field> BaseAir<F> for BlobEvalAir {
     fn num_public_values(&self) -> usize {
         PUBLIC_VALUES
     }
+}
+
+/// The permutation input of a row: the element's bytes, 3 per value, then the capacity.
+fn absorb<R: PrimeCharacteristicRing>(e: &[R], cap: &[R]) -> [R; poseidon2_24::T] {
+    core::array::from_fn(|k| {
+        if k < 11 {
+            (0..3).filter(|j| 3 * k + j < B).fold(R::ZERO, |acc, j| acc + e[3 * k + j].clone() * R::from_u32(1 << (8 * j)))
+        } else if k < RATE {
+            R::ZERO
+        } else {
+            cap[k - RATE].clone()
+        }
+    })
 }
 
 fn product<AB: AirBuilder>(builder: &mut AB, a: &[AB::Expr], b: &[AB::Expr], q: &[AB::Expr], r: &[AB::Expr], c: &[AB::Expr], p: &[u8; B]) {
@@ -359,7 +414,17 @@ where
             let mut t = builder.when_transition();
             sum_zero(&mut t, &cols, &n[AA..AA + B - 1]);
         }
-        for j in 0..WIDTH {
+        // the commitment
+        let input = absorb(&c[E..E + B], &c[CAP..CAP + CAPACITY]);
+        let out = poseidon2_24::eval(builder, input, &c[P2..P2 + poseidon2_24::COLS]);
+        for k in 0..CAPACITY {
+            builder.when_first_row().assert_eq(c[CAP + k].clone(), AB::Expr::from_u32(if k == 0 { TAG } else { 0 }));
+            builder.when_transition().assert_eq(n[CAP + k].clone(), out[RATE + k].clone());
+        }
+        for k in 0..DIGEST {
+            builder.when_last_row().assert_eq(out[k].clone(), pv[2 * B + k].clone());
+        }
+        for j in 0..BYTE_COLS {
             builder.push_interaction("byte", [c[j].clone()], 1);
         }
     }
@@ -429,13 +494,13 @@ mod tests {
     }
 
     fn prove_and_verify(e: &[BigUint], z: &BigUint, claimed: Option<&BigUint>) -> bool {
-        prove_and_verify_with(e, z, claimed, None, |_| {})
+        prove_and_verify_with(e, z, claimed, None, None, |_| {})
     }
 
     /// Proves the trace of `e` at `z` (after `tamper`), verifies it against `claimed` (default:
     /// the honest S) at `z_verify` (default: z). A prover panic counts as rejection.
-    fn prove_and_verify_with(e: &[BigUint], z: &BigUint, claimed: Option<&BigUint>, z_verify: Option<&BigUint>, tamper: impl Fn(&mut RowMajorMatrix<BabyBear>)) -> bool {
-        let (mut t, s) = trace::<BabyBear>(e, z);
+    fn prove_and_verify_with(e: &[BigUint], z: &BigUint, claimed: Option<&BigUint>, z_verify: Option<&BigUint>, digest_verify: Option<usize>, tamper: impl Fn(&mut RowMajorMatrix<BabyBear>)) -> bool {
+        let (mut t, s, d) = trace::<BabyBear>(e, z);
         tamper(&mut t);
         let mut m = [0u64; 256];
         byte_counts(&t, &mut m);
@@ -443,13 +508,17 @@ mod tests {
         let cfg = config::<BabyBear>(1, 8);
         let airs = vec![Airs::Blob(BlobEvalAir), Airs::Table(ByteTableAir)];
         let pd = ProverData::<Config<BabyBear>>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &[LOG_ROWS, 8], &[3, 3], 1).unwrap();
-        let pv_prove = vec![public_values::<BabyBear>(z, &s), vec![]];
+        let pv_prove = vec![public_values::<BabyBear>(z, &s, &d), vec![]];
         let traces = [&t, &table];
         let inst = StarkInstance::new_multiple(&airs, &traces, &pv_prove);
         let Ok(Ok(proof)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_batch(&cfg, &inst, &pd))) else {
             return false;
         };
-        let pv = vec![public_values::<BabyBear>(z_verify.unwrap_or(z), claimed.unwrap_or(&s)), vec![]];
+        let mut dv = d;
+        if let Some(i) = digest_verify {
+            dv[i] += BabyBear::ONE;
+        }
+        let pv = vec![public_values::<BabyBear>(z_verify.unwrap_or(z), claimed.unwrap_or(&s), &dv), vec![]];
         verify_batch(&cfg, &airs, &proof, &pv, &pd.common).is_ok()
     }
 
@@ -457,8 +526,12 @@ mod tests {
     fn witness_sum_matches_the_barycentric_formula() {
         let e = blob_elements(3);
         let z = BigUint::from(0x1234_5678_9abc_def0u64) * BigUint::from(0xfedc_ba98u64);
-        let (_, s) = trace::<BabyBear>(&e, &z);
+        let (_, s, d) = trace::<BabyBear>(&e, &z);
         assert_eq!(s, barycentric_sum(&e, &z));
+        assert_eq!(d, digest::<BabyBear>(&e));
+        let mut e2 = e.clone();
+        e2[4095] += 1u32;
+        assert_ne!(d, digest::<BabyBear>(&e2), "the digest covers the last element");
         // and p(z) from S is the polynomial through the elements: at z = w_j the limit is e_j,
         // so check against a direct Lagrange evaluation instead (independent formula)
         let p = modulus();
@@ -484,12 +557,19 @@ mod tests {
         assert!(!prove_and_verify(&e, &z, Some(&wrong)), "a sum the trace does not have");
         // the same proof at another point
         let z2 = (&z + 1u32) % modulus();
-        assert!(!prove_and_verify_with(&e, &z, None, Some(&z2), |_| {}), "another z");
+        assert!(!prove_and_verify_with(&e, &z, None, Some(&z2), None, |_| {}), "another z");
         // a trace whose element 5 was changed after the witness was made
         let tamper_e = |t: &mut RowMajorMatrix<BabyBear>| t.values[5 * WIDTH + E + 3] += BabyBear::ONE;
-        assert!(!prove_and_verify_with(&e, &z, None, None, tamper_e), "element changed");
+        assert!(!prove_and_verify_with(&e, &z, None, None, None, tamper_e), "element changed");
         // a running sum that skips row 100's term
         let tamper_acc = |t: &mut RowMajorMatrix<BabyBear>| t.values[100 * WIDTH + U] += BabyBear::ONE;
-        assert!(!prove_and_verify_with(&e, &z, None, None, tamper_acc), "term changed");
+        assert!(!prove_and_verify_with(&e, &z, None, None, None, tamper_acc), "term changed");
+        // another digest for the same elements
+        assert!(!prove_and_verify_with(&e, &z, None, None, Some(3), |_| {}), "another digest");
+        // an element changed with its whole row recomputed (sum and permutation), but the
+        // capacity chain left as it was: the next row's permutation no longer starts from it
+        let (t2, _, _) = trace::<BabyBear>(&{ let mut x = e.clone(); x[9] += 1u32; x }, &z);
+        let swap = |t: &mut RowMajorMatrix<BabyBear>| t.values[9 * WIDTH..10 * WIDTH].copy_from_slice(&t2.values[9 * WIDTH..10 * WIDTH]);
+        assert!(!prove_and_verify_with(&e, &z, None, None, None, swap), "element swapped in");
     }
 }
