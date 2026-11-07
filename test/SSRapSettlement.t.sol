@@ -26,22 +26,62 @@ contract SSRapSettlementTest {
     SSRapSettlementVerifierV2 internal settlement;
     Groth16Verifier internal groth16;
 
+    /// The transaction's blob hashes; set on every call, since newer forge does not keep
+    /// blobhashes from setUp in the test.
+    bytes32[] internal blobSet;
+
     function setUp() public {
         groth16 = new Groth16Verifier();
-        settlement = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)));
+        settlement = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)), 1);
+        // the fixture's proof is bound to this contract's address (the test contract's 2nd CREATE)
+        require(address(settlement) == F.SETTLEMENT, "settlement is not at the fixture's address");
         vm.chainId(F.CHAIN_ID);
-        bytes32[] memory blobs = new bytes32[](1);
-        blobs[0] = F.BLOB_HASH;
-        vm.blobhashes(blobs);
+        blobSet.push(F.BLOB_HASH);
+    }
+
+    /// The fixture's blob evaluation (audit H-01): point, values, KZG commitment and opening.
+    function _ev() internal pure returns (SSRapSettlementVerifierV2.BlobEvaluation memory) {
+        return SSRapSettlementVerifierV2.BlobEvaluation(F.BLOB_POINT, F.blobValues(), F.KZG);
+    }
+
+    /// Settles with the fixture's proof and another blob evaluation; expects `err`.
+    function _settleEv(SSRapSettlementVerifierV2.BlobEvaluation memory ev, bytes4 err) internal {
+        vm.blobhashes(blobSet);
+        vm.prank(AGG);
+        vm.expectRevert(err);
+        settlement.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, ev, F.a(), F.b(), F.c());
+    }
+
+    /// Audit H-01: the blob's value at the point is checked against the blob itself (0x0a).
+    function test_rejectsAnotherBlobValue() public {
+        SSRapSettlementVerifierV2.BlobEvaluation memory ev = _ev();
+        ev.values[0] = bytes32(uint256(ev.values[0]) ^ 1);
+        _settleEv(ev, SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
+    }
+
+    function test_rejectsAnotherBlobPoint() public {
+        SSRapSettlementVerifierV2.BlobEvaluation memory ev = _ev();
+        ev.point = bytes32(uint256(ev.point) + 1);
+        _settleEv(ev, SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
+    }
+
+    function test_rejectsMissingOrExtraKzgOpening() public {
+        SSRapSettlementVerifierV2.BlobEvaluation memory ev = _ev();
+        ev.kzg = "";
+        _settleEv(ev, SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
+        ev = _ev();
+        ev.values = new bytes32[](2);
+        _settleEv(ev, SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
     }
 
     function _settle(bytes32 newRoot, uint256 batch, uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c) internal {
+        vm.blobhashes(blobSet);
         vm.prank(AGG);
-        settlement.verifyAndSettleBatchV2(F.OLD_ROOT, newRoot, F.VUMT_ROOT, batch, a, b, c);
+        settlement.verifyAndSettleBatchV2(F.OLD_ROOT, newRoot, F.VUMT_ROOT, batch, _ev(), a, b, c);
     }
 
     function test_publicInputMatchesRust() public view {
-        uint256 x = settlement.computePublicInput(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BLOB_HASH, F.BATCH);
+        uint256 x = settlement.computePublicInput(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BLOB_HASH, F.BATCH, F.BLOB_POINT, F.blobValues());
         require(x == F.PUBLIC_INPUT, "public input differs from Rust");
         require(groth16.verifyProof(F.a(), F.b(), F.c(), x), "Rust proof must verify in Solidity");
     }
@@ -78,13 +118,28 @@ contract SSRapSettlementTest {
     function test_rejectsOtherBlob() public {
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = bytes32(uint256(F.BLOB_HASH) ^ 1);
+        blobSet = blobs;
         vm.blobhashes(blobs);
-        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        // the KZG opening is for the fixture's blob: the precompile rejects it for another one
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
+        _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
+    }
+
+    function test_severalBlobsBindTheirKeccak() public {
+        bytes32[] memory blobs = new bytes32[](3);
+        blobs[0] = F.BLOB_HASH;
+        blobs[1] = bytes32(uint256(2));
+        blobs[2] = bytes32(uint256(3));
+        blobSet = blobs;
+        vm.blobhashes(blobs);
+        require(settlement.blobsHash() == keccak256(abi.encodePacked(blobs[0], blobs[1], blobs[2])), "blobs hash");
+        // this deployment has one blob slot: a transaction with more blobs is refused
+        vm.expectRevert(SSRapSettlementVerifierV2.TooManyBlobs.selector);
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
 
     function test_rejectsMissingBlob() public {
-        vm.blobhashes(new bytes32[](0));
+        delete blobSet;
         vm.expectRevert(SSRapSettlementVerifierV2.MissingEip4844Blob.selector);
         _settle(F.NEW_ROOT, F.BATCH, F.a(), F.b(), F.c());
     }
@@ -101,9 +156,10 @@ contract SSRapSettlementTest {
     }
 
     function test_rejectsWrongOldRoot() public {
+        vm.blobhashes(blobSet);
         vm.prank(AGG);
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidStateTransition.selector);
-        settlement.verifyAndSettleBatchV2(bytes32(0), F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, F.a(), F.b(), F.c());
+        settlement.verifyAndSettleBatchV2(bytes32(0), F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, _ev(), F.a(), F.b(), F.c());
     }
 
     function test_rejectsReplay() public {
@@ -113,8 +169,9 @@ contract SSRapSettlementTest {
     }
 
     function test_rejectsUnauthorizedAggregator() public {
+        vm.blobhashes(blobSet);
         vm.expectRevert(SSRapSettlementVerifierV2.UnauthorizedAggregator.selector);
-        settlement.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, F.a(), F.b(), F.c());
+        settlement.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, _ev(), F.a(), F.b(), F.c());
     }
 
     function test_rejectsNonCanonicalCoordinate() public {
@@ -122,5 +179,44 @@ contract SSRapSettlementTest {
         a[0] = a[0] + P_MOD; // same point mod p, but not canonical: malleability guard
         vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
         _settle(F.NEW_ROOT, F.BATCH, a, F.b(), F.c());
+    }
+
+    /// Audit SET-06: the same proof, header and blob on another deployment (same chain, key,
+    /// genesis root and aggregator) must not settle.
+    function test_rejectsSameProofOnAnotherDeployment() public {
+        SSRapSettlementVerifierV2 twin = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)), 1);
+        vm.blobhashes(blobSet);
+        vm.prank(AGG);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        twin.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, _ev(), F.a(), F.b(), F.c());
+    }
+
+    function test_constructorRejectsMissingAggregatorOrVerifier() public {
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidDeployment.selector);
+        new SSRapSettlementVerifierV2(F.OLD_ROOT, address(0), IGroth16Verifier(address(groth16)), 1);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidDeployment.selector);
+        new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(0xBEEF)), 1);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidDeployment.selector);
+        new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)), 0);
+    }
+
+    /// A slot without a blob must carry the value 0 (else the proven elements of that slot are
+    /// not empty, and nothing on L1 holds them).
+    function test_rejectsValueForEmptySlot() public {
+        SSRapSettlementVerifierV2 two = new SSRapSettlementVerifierV2(F.OLD_ROOT, AGG, IGroth16Verifier(address(groth16)), 2);
+        SSRapSettlementVerifierV2.BlobEvaluation memory ev = _ev();
+        ev.values = new bytes32[](2);
+        ev.values[0] = F.blobValues()[0];
+        ev.values[1] = bytes32(uint256(1));
+        vm.blobhashes(blobSet);
+        vm.prank(AGG);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidBlobEvaluation.selector);
+        two.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, ev, F.a(), F.b(), F.c());
+        // with 0 there the blob checks pass, and the proof (made for one slot) does not verify
+        ev.values[1] = bytes32(0);
+        vm.blobhashes(blobSet);
+        vm.prank(AGG);
+        vm.expectRevert(SSRapSettlementVerifierV2.InvalidGroth16Proof.selector);
+        two.verifyAndSettleBatchV2(F.OLD_ROOT, F.NEW_ROOT, F.VUMT_ROOT, F.BATCH, ev, F.a(), F.b(), F.c());
     }
 }

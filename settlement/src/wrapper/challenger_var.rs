@@ -272,8 +272,9 @@ mod tests {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = ss_rap_p3::state::Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let proof = ss_rap_p3::record::prove_one(&st, &traces, &p);
-        let (ok, ops) = ss_rap_p3::record::verify_one(&st, &proof, &p);
+        let blobs = ss_rap_p3::state::tests_blobs(&st);
+        let proof = ss_rap_p3::record::prove_one(&st, &traces, &blobs, &p);
+        let (ok, ops) = ss_rap_p3::record::verify_one(&st, &proof, &blobs.claim(), &p);
         assert!(ok);
         // native replay
         let mut n = Native::default();

@@ -14,6 +14,8 @@ use ss_rap_settlement::sequencer::{address_of, dev_key, Sequencer, Tx};
 use std::path::Path;
 use std::time::Instant;
 
+use ss_rap_settlement::public_input::checksum;
+
 fn hex(b: &[u8; 32]) -> String {
     format!("0x{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
 }
@@ -28,17 +30,19 @@ fn main() {
     for k in 0..12u64 {
         let from = k % 6 + 1;
         let kind = if k % 2 == 0 { TxKind::Transfer } else { TxKind::Swap };
-        let tx = Tx::signed(&dev_key(from), addr((from % 6) + 1), 10 + k, (k / 6) as u32, kind, seq.chain_id);
+        let tx = Tx::signed(&dev_key(from), addr((from % 6) + 1), 10 + k, (k / 6) as u32, kind, &seq.domain);
         seq.submit(tx).expect("valid tx");
     }
     let batch = seq.seal();
-    let cfg = PipelineConfig { chain_id: 31337, num_queries: 2, log_blowup: 2 };
+    let cfg = PipelineConfig { num_queries: 2, log_blowup: 2, ..PipelineConfig::default() };
     let shape = batch_shape(&batch, &cfg).expect("shape");
 
     let t0 = Instant::now();
     let (pk, vk) = groth16::stark_dev_setup(shape);
     let setup = t0.elapsed();
-    let pkg = settle_with(&batch, &pk, &vk, Wrapper::Stark(shape), &cfg, &schedule, &cost).expect("pipeline");
+    // seeded proof randomness: reproducible fixture (production uses an OS-seeded CSPRNG)
+    let mut rng: rand_chacha::ChaCha20Rng = rand_chacha::rand_core::SeedableRng::seed_from_u64(batch.batch_number);
+    let pkg = settle_with(&batch, &pk, &vk, Wrapper::Stark(shape), &cfg, &schedule, &cost, &mut rng).expect("pipeline");
     let h = &pkg.header;
 
     std::fs::write(
@@ -67,8 +71,9 @@ library StarkSettlementFixture {{
     bytes32 internal constant BLOB_HASH = {blob};
     uint256 internal constant BATCH = {batch};
     uint256 internal constant CHAIN_ID = {chain};
+    address internal constant SETTLEMENT = {settlement};
     uint256 internal constant PUBLIC_INPUT = {x};
-
+{blob_eval}
     function a() internal pure returns (uint256[2] memory p) {{
         p = [uint256({a0}), uint256({a1})];
     }}
@@ -86,11 +91,13 @@ library StarkSettlementFixture {{
         txs = batch.txs.len(),
         q = cfg.num_queries,
         chain = h.chain_id,
+        settlement = checksum(&h.settlement),
         old = hex(&h.old_state_root),
         new = hex(&h.new_state_root),
         vumt = hex(&h.v_umt_root),
         blob = hex(&h.blob_versioned_hash),
         x = fr_hex(&pkg.public_input),
+        blob_eval = ss_rap_settlement::blob_eval::solidity_fixture(h, &pkg.blob_kzg),
         a0 = a[0], a1 = a[1],
         b00 = b[0][0], b01 = b[0][1], b10 = b[1][0], b11 = b[1][1],
         c0 = c[0], c1 = c[1],

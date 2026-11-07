@@ -124,6 +124,11 @@ impl StateStatement {
     pub fn new_root(&self) -> [u8; 32] {
         state_root(&self.addrs, &self.states[DEFAULT_RNS_CHANNELS])
     }
+    /// The statement without its transfers: what a proof with private transfers is about
+    /// (`ss_rap_p3::state`, the Plonky3 path).
+    pub fn public_part(&self) -> Self {
+        Self { lanes: Default::default(), ..self.clone() }
+    }
     pub fn num_txs(&self) -> usize {
         self.lanes.iter().map(Vec::len).sum()
     }

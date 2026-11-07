@@ -128,37 +128,31 @@ pub fn config(log_blowup: usize, queries: usize, query_pow: usize) -> (Config, A
 #[allow(dead_code)]
 fn _types(_: Perm, _: ValMmcs<F>) {}
 
-use crate::state::{all_airs, all_instance, Params};
+use crate::blob_eval::{BlobClaim, BlobInput};
+use crate::state::{all_airs, all_degrees, all_instance, all_public_values, Params};
 use p3_batch_stark::{prove_batch, verify_batch, BatchProof, ProverData, StarkInstance};
 use p3_matrix::dense::RowMajorMatrix;
 use ss_rap_v2::state::StateStatement;
 
-fn all_degrees(st: &StateStatement, p: &Params) -> Vec<usize> {
-    let mut d = vec![p.log_rows; 5];
-    d.push(8);
-    d.extend((0..5).map(|l| crate::state::PublicAir::<F>::new(st, l).log_rows));
-    d
-}
-
 /// `poseidon2_bn254::prove_one` with the recording challenger.
-pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], p: &Params) -> BatchProof<Config> {
+pub fn prove_one(st: &StateStatement, traces: &[Vec<Vec<u32>>; 5], blobs: &BlobInput, p: &Params) -> BatchProof<Config> {
     let (cfg, _) = config(p.log_blowup, p.queries, p.query_pow);
-    let (airs, traces, degs) = all_instance::<F>(st, traces);
+    let (airs, traces, degs) = all_instance::<F>(st, traces, blobs);
     let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     let refs: Vec<&RowMajorMatrix<F>> = traces.iter().collect();
-    let pv = crate::state::public_values(st, &airs);
+    let pv = all_public_values(st, &airs, &blobs.claim());
     let inst = StarkInstance::new_multiple(&airs, &refs, &pv);
     prove_batch(&cfg, &inst, &pd).expect("prove")
 }
 
 /// Verifies like `poseidon2_bn254::verify_one` (without the statement checks) and returns the
 /// Fiat-Shamir log of the verification.
-pub fn verify_one(st: &StateStatement, proof: &BatchProof<Config>, p: &Params) -> (bool, Vec<Op>) {
+pub fn verify_one(st: &StateStatement, proof: &BatchProof<Config>, blobs: &BlobClaim, p: &Params) -> (bool, Vec<Op>) {
     let (cfg, log) = config(p.log_blowup, p.queries, p.query_pow);
-    let airs = all_airs::<F>(st);
-    let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p), &vec![p.budget; airs.len()], p.log_blowup).unwrap();
+    let airs = all_airs::<F>(st, p.log_rows, blobs.slots());
+    let pd = ProverData::<Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &all_degrees(st, p, blobs.slots()), &vec![p.budget; airs.len()], p.log_blowup).unwrap();
     log.lock().unwrap().clear();
-    let ok = verify_batch(&cfg, &airs, proof, &crate::state::public_values(st, &airs), &pd.common).is_ok();
+    let ok = verify_batch(&cfg, &airs, proof, &all_public_values(st, &airs, blobs), &pd.common).is_ok();
     let ops = log.lock().unwrap().clone();
     (ok, ops)
 }
@@ -171,8 +165,9 @@ mod tests {
     fn recorded_verification_log() {
         let (st, traces) = crate::state::tests_case(1100, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let proof = prove_one(&st, &traces, &p);
-        let (ok, ops) = verify_one(&st, &proof, &p);
+        let b = crate::state::tests_blobs(&st);
+        let proof = prove_one(&st, &traces, &b, &p);
+        let (ok, ops) = verify_one(&st, &proof, &b.claim(), &p);
         assert!(ok);
         let count = |f: fn(&Op) -> bool| ops.iter().filter(|o| f(o)).count();
         eprintln!(

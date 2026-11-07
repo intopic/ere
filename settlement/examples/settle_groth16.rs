@@ -37,7 +37,7 @@ fn main() {
     let proof = state::prove(&st, &traces, &params, &mut Transcript::with_mode(LABEL, HashMode::Poseidon));
     println!("STARK prove (Poseidon-BN254): {:.2?}", t0.elapsed());
     let shape = SettleShape { statement: StatementShape::of(&st, params.log_rows), params };
-    let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &proof), blob_versioned_hash: [1; 32], batch_number: 1, chain_id: 31337 };
+    let h = BatchHeader { old_state_root: st.old_root(), new_state_root: st.new_root(), v_umt_root: v_umt_root(&st, &proof), blob_versioned_hash: [1; 32], batch_number: 1, chain_id: 31337, settlement: ss_rap_settlement::public_input::FORGE_SETTLEMENT, blob_point: [0; 32], blob_values: vec![[0; 32]; ss_rap_settlement::wrapper::settle_circuit::UNCHECKED_BLOB_SLOTS] };
     let circ = SettleCircuit { shape, st: Some(&st), proof: Some(&proof), header: Some(&h) };
 
     let cs = ConstraintSystem::new_ref();

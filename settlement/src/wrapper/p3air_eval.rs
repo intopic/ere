@@ -33,6 +33,23 @@ pub trait Ctx {
     fn ext(&mut self, c: [u32; 4]) -> Self::E;
     /// a * X (X the extension generator, X^4 = 11)
     fn mul_x(&mut self, a: &Self::E) -> R<Self::E>;
+    /// a * b where the result may stay unreduced (in circuit)
+    fn mul_lazy(&mut self, a: &Self::E, b: &Self::E) -> R<Self::E> {
+        self.mul(a, b)
+    }
+    /// a computed value about to be multiplied (in circuit: reduced if wide)
+    fn prep(&mut self, a: &Self::E) -> R<Self::E> {
+        Ok(a.clone())
+    }
+    /// sum_i a_i * b_i (in circuit: one reduction for the whole sum)
+    fn dot(&mut self, a: &[Self::E], b: &[Self::E]) -> R<Self::E> {
+        let mut acc = self.base(0);
+        for (x, y) in a.iter().zip(b) {
+            let p = self.mul(x, y)?;
+            acc = self.add(&acc, &p)?;
+        }
+        Ok(acc)
+    }
 }
 
 /// Everything the constraints read at the out-of-domain point (one instance).
@@ -47,6 +64,8 @@ pub struct Point<E> {
     pub challenges: Vec<E>,
     pub perm_values: Vec<E>,
     pub periodic: Vec<E>,
+    /// the instance's public values (base field)
+    pub public: Vec<E>,
     pub is_first_row: E,
     pub is_last_row: E,
     pub is_transition: E,
@@ -57,6 +76,64 @@ pub struct Eval<'a, C: Ctx> {
     pt: &'a Point<C::E>,
     base_memo: HashMap<usize, C::E>,
     ext_memo: HashMap<usize, C::E>,
+    /// base expressions as linear forms over "atoms" (opened values and products)
+    atoms: Vec<C::E>,
+    leaf_atoms: HashMap<(u8, usize, usize), usize>,
+    lin_memo: HashMap<usize, Lin>,
+    /// operands of products, by linear form (computed and prepared once)
+    operands: HashMap<(Vec<(usize, u32)>, u32), C::E>,
+}
+
+const P_BB: u64 = 2013265921;
+
+/// sum_j c_j * atom_j + k over BabyBear (terms sorted by atom). Additions and constant
+/// multiples of base expressions stay linear forms, so a chain of linear layers (Poseidon2's
+/// partial rounds) costs nothing in R1CS until a product needs its value.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct Lin {
+    terms: Vec<(usize, u32)>,
+    k: u32,
+}
+
+impl Lin {
+    fn atom(i: usize) -> Self {
+        Self { terms: vec![(i, 1)], k: 0 }
+    }
+    fn constant(c: u32) -> Self {
+        Self { terms: vec![], k: c }
+    }
+    fn is_const(&self) -> Option<u32> {
+        self.terms.is_empty().then_some(self.k)
+    }
+    /// self + s * o
+    fn axpy(&self, s: u32, o: &Self) -> Self {
+        let mul = |c: u32| (c as u64 * s as u64 % P_BB) as u32;
+        let add = |a: u32, b: u32| ((a as u64 + b as u64) % P_BB) as u32;
+        let (mut i, mut j) = (0, 0);
+        let mut t = Vec::with_capacity(self.terms.len() + o.terms.len());
+        while i < self.terms.len() || j < o.terms.len() {
+            let x = self.terms.get(i).map(|x| x.0).unwrap_or(usize::MAX);
+            let y = o.terms.get(j).map(|y| y.0).unwrap_or(usize::MAX);
+            let (id, c) = if x < y {
+                i += 1;
+                (x, self.terms[i - 1].1)
+            } else if y < x {
+                j += 1;
+                (y, mul(o.terms[j - 1].1))
+            } else {
+                i += 1;
+                j += 1;
+                (x, add(self.terms[i - 1].1, mul(o.terms[j - 1].1)))
+            };
+            if c != 0 {
+                t.push((id, c));
+            }
+        }
+        Self { terms: t, k: add(self.k, mul(o.k)) }
+    }
+    fn scale(&self, s: u32) -> Self {
+        Self::default().axpy(s, self)
+    }
 }
 
 fn addr<T>(x: &T) -> usize {
@@ -65,62 +142,128 @@ fn addr<T>(x: &T) -> usize {
 
 impl<'a, C: Ctx> Eval<'a, C> {
     pub fn new(ctx: &'a mut C, pt: &'a Point<C::E>) -> Self {
-        Self { ctx, pt, base_memo: HashMap::new(), ext_memo: HashMap::new() }
+        Self { ctx, pt, base_memo: HashMap::new(), ext_memo: HashMap::new(), atoms: vec![], leaf_atoms: HashMap::new(), lin_memo: HashMap::new(), operands: HashMap::new() }
     }
 
     pub fn base(&mut self, e: &SymbolicExpression<F>) -> R<C::E> {
         if let Some(v) = self.base_memo.get(&addr(e)) {
             return Ok(v.clone());
         }
-        let v = match e {
-            SymbolicExpr::Leaf(l) => match l {
-                BaseLeaf::Variable(v) => match v.entry {
-                    BaseEntry::Main { offset: 0 } => self.pt.main_local[v.index].clone(),
-                    BaseEntry::Main { offset: 1 } => self.pt.main_next[v.index].clone(),
-                    BaseEntry::Preprocessed { offset: 0 } => self.pt.pre_local[v.index].clone(),
-                    BaseEntry::Preprocessed { offset: 1 } => self.pt.pre_next[v.index].clone(),
-                    BaseEntry::Periodic => self.pt.periodic[v.index].clone(),
-                    other => panic!("unsupported base entry {other:?}"),
-                },
-                BaseLeaf::IsFirstRow => self.pt.is_first_row.clone(),
-                BaseLeaf::IsLastRow => self.pt.is_last_row.clone(),
-                BaseLeaf::IsTransition => self.pt.is_transition.clone(),
-                BaseLeaf::Constant(c) => self.ctx.base(c.as_canonical_u32()),
-            },
-            SymbolicExpr::Add { x, y, .. } => {
-                let (a, b) = (self.base(x)?, self.base(y)?);
-                self.ctx.add(&a, &b)?
-            }
-            SymbolicExpr::Sub { x, y, .. } => {
-                let (a, b) = (self.base(x)?, self.base(y)?);
-                self.ctx.sub(&a, &b)?
-            }
-            SymbolicExpr::Neg { x, .. } => {
-                let a = self.base(x)?;
-                self.ctx.neg(&a)?
-            }
-            SymbolicExpr::Mul { x, y, .. } => self.mul_base(x, y)?,
-        };
+        let l = self.lin(e)?;
+        let v = self.materialize(&l)?;
         self.base_memo.insert(addr(e), v.clone());
         Ok(v)
     }
 
-    /// x * y, as a scaling when one side is a small constant.
-    fn mul_base(&mut self, x: &SymbolicExpression<F>, y: &SymbolicExpression<F>) -> R<C::E> {
-        let small = |e: &SymbolicExpression<F>| match e {
-            SymbolicExpr::Leaf(BaseLeaf::Constant(c)) => Some(c.as_canonical_u32()),
-            _ => None,
+    fn new_atom(&mut self, v: C::E) -> usize {
+        self.atoms.push(v);
+        self.atoms.len() - 1
+    }
+
+    /// The value of a linear form: free in R1CS (constant multiples and sums of variables).
+    fn materialize(&mut self, l: &Lin) -> R<C::E> {
+        if l.k == 0 && l.terms.len() == 1 && l.terms[0].1 == 1 {
+            return Ok(self.atoms[l.terms[0].0].clone());
+        }
+        let mut acc = self.ctx.base(l.k);
+        for &(i, c) in &l.terms {
+            let a = self.atoms[i].clone();
+            let t = if c == 1 { a } else { self.ctx.scale(&a, c)? };
+            acc = self.ctx.add(&acc, &t)?;
+        }
+        Ok(acc)
+    }
+
+    /// A factor of a product: an atom as it is, a combination computed and prepared once.
+    fn operand(&mut self, l: &Lin) -> R<C::E> {
+        if l.k == 0 && l.terms.len() == 1 && l.terms[0].1 == 1 {
+            return Ok(self.atoms[l.terms[0].0].clone());
+        }
+        let key = (l.terms.clone(), l.k);
+        if let Some(v) = self.operands.get(&key) {
+            return Ok(v.clone());
+        }
+        let v = self.materialize(l)?;
+        let v = self.ctx.prep(&v)?;
+        self.operands.insert(key, v.clone());
+        Ok(v)
+    }
+
+    fn lin(&mut self, e: &SymbolicExpression<F>) -> R<Lin> {
+        if let Some(l) = self.lin_memo.get(&addr(e)) {
+            return Ok(l.clone());
+        }
+        let l = match e {
+            SymbolicExpr::Leaf(BaseLeaf::Constant(c)) => Lin::constant(c.as_canonical_u32()),
+            SymbolicExpr::Leaf(leaf) => {
+                let key = match leaf {
+                    BaseLeaf::Variable(v) => {
+                        let k = match v.entry {
+                            BaseEntry::Main { offset } => offset as u8,
+                            BaseEntry::Preprocessed { offset } => 2 + offset as u8,
+                            BaseEntry::Periodic => 4,
+                            BaseEntry::Public => 5,
+                        };
+                        (k, v.index, 0)
+                    }
+                    BaseLeaf::IsFirstRow => (6, 0, 0),
+                    BaseLeaf::IsLastRow => (7, 0, 0),
+                    BaseLeaf::IsTransition => (8, 0, 0),
+                    BaseLeaf::Constant(_) => unreachable!(),
+                };
+                match self.leaf_atoms.get(&key) {
+                    Some(&i) => Lin::atom(i),
+                    None => {
+                        let v = self.leaf(e);
+                        let i = self.new_atom(v);
+                        self.leaf_atoms.insert(key, i);
+                        Lin::atom(i)
+                    }
+                }
+            }
+            SymbolicExpr::Add { x, y, .. } => {
+                let (a, b) = (self.lin(x)?, self.lin(y)?);
+                a.axpy(1, &b)
+            }
+            SymbolicExpr::Sub { x, y, .. } => {
+                let (a, b) = (self.lin(x)?, self.lin(y)?);
+                a.axpy((P_BB - 1) as u32, &b)
+            }
+            SymbolicExpr::Neg { x, .. } => self.lin(x)?.scale((P_BB - 1) as u32),
+            SymbolicExpr::Mul { x, y, .. } => {
+                let (a, b) = (self.lin(x)?, self.lin(y)?);
+                if let Some(c) = a.is_const() {
+                    b.scale(c)
+                } else if let Some(c) = b.is_const() {
+                    a.scale(c)
+                } else {
+                    let (va, vb) = (self.operand(&a)?, self.operand(&b)?);
+                    let p = self.ctx.mul_lazy(&va, &vb)?;
+                    Lin::atom(self.new_atom(p))
+                }
+            }
         };
-        if let Some(c) = small(x) {
-            let b = self.base(y)?;
-            return self.ctx.scale(&b, c);
+        self.lin_memo.insert(addr(e), l.clone());
+        Ok(l)
+    }
+
+    fn leaf(&mut self, e: &SymbolicExpression<F>) -> C::E {
+        let SymbolicExpr::Leaf(l) = e else { unreachable!() };
+        match l {
+            BaseLeaf::Variable(v) => match v.entry {
+                BaseEntry::Main { offset: 0 } => self.pt.main_local[v.index].clone(),
+                BaseEntry::Main { offset: 1 } => self.pt.main_next[v.index].clone(),
+                BaseEntry::Preprocessed { offset: 0 } => self.pt.pre_local[v.index].clone(),
+                BaseEntry::Preprocessed { offset: 1 } => self.pt.pre_next[v.index].clone(),
+                BaseEntry::Periodic => self.pt.periodic[v.index].clone(),
+                BaseEntry::Public => self.pt.public[v.index].clone(),
+                other => panic!("unsupported base entry {other:?}"),
+            },
+            BaseLeaf::IsFirstRow => self.pt.is_first_row.clone(),
+            BaseLeaf::IsLastRow => self.pt.is_last_row.clone(),
+            BaseLeaf::IsTransition => self.pt.is_transition.clone(),
+            BaseLeaf::Constant(c) => self.ctx.base(c.as_canonical_u32()),
         }
-        if let Some(c) = small(y) {
-            let a = self.base(x)?;
-            return self.ctx.scale(&a, c);
-        }
-        let (a, b) = (self.base(x)?, self.base(y)?);
-        self.ctx.mul(&a, &b)
     }
 
     pub fn ext(&mut self, e: &SymbolicExpressionExt<F, EF>) -> R<C::E> {
@@ -167,7 +310,7 @@ impl<'a, C: Ctx> Eval<'a, C> {
                     self.ctx.scale(&a, c)?
                 } else {
                     let (a, b) = (self.ext(x)?, self.ext(y)?);
-                    self.ctx.mul(&a, &b)?
+                    self.ctx.mul_lazy(&a, &b)?
                 }
             }
         };
@@ -175,20 +318,41 @@ impl<'a, C: Ctx> Eval<'a, C> {
         Ok(v)
     }
 
-    /// Horner fold of all constraints: base first, then extension.
+    /// The fold of all constraints (base first, then extension) that Plonky3's Horner loop
+    /// `acc = acc * alpha + c` computes, i.e. sum_i c_i * alpha^(n-1-i), evaluated as
+    /// sum_a alpha^(K a) * (sum_b c_(K a + b) * alpha^b): two levels of dot products, so the
+    /// circuit reduces once per group of K constraints instead of once per constraint.
     pub fn fold(&mut self, base: &[SymbolicExpression<F>], ext: &[SymbolicExpressionExt<F, EF>], alpha: &C::E) -> R<C::E> {
-        let mut acc = self.ctx.base(0);
+        const K: usize = 32;
+        let mut cs = Vec::with_capacity(base.len() + ext.len());
         for c in base {
-            let v = self.base(c)?;
-            let t = self.ctx.mul(&acc, alpha)?;
-            acc = self.ctx.add(&t, &v)?;
+            cs.push(self.base(c)?);
         }
         for c in ext {
-            let v = self.ext(c)?;
-            let t = self.ctx.mul(&acc, alpha)?;
-            acc = self.ctx.add(&t, &v)?;
+            cs.push(self.ext(c)?);
         }
-        Ok(acc)
+        cs.reverse(); // cs[e] has weight alpha^e
+        let n = cs.len();
+        if n == 0 {
+            return Ok(self.ctx.base(0));
+        }
+        let mut low = vec![self.ctx.base(1)];
+        while low.len() < K.min(n) {
+            let x = self.ctx.mul(low.last().unwrap(), alpha)?;
+            low.push(self.ctx.prep(&x)?);
+        }
+        let groups = n.div_ceil(K);
+        let mut high = vec![self.ctx.base(1)];
+        if groups > 1 {
+            let step = self.ctx.mul(low.last().unwrap(), alpha)?; // alpha^K
+            let step = self.ctx.prep(&step)?;
+            while high.len() < groups {
+                let x = self.ctx.mul(high.last().unwrap(), &step)?;
+                high.push(self.ctx.prep(&x)?);
+            }
+        }
+        let sums: Vec<C::E> = cs.chunks(K).map(|g| self.ctx.dot(g, &low[..g.len()])).collect::<R<_>>()?;
+        self.ctx.dot(&sums, &high)
     }
 }
 
@@ -342,15 +506,18 @@ mod tests {
         let _heavy = crate::heavy_test_lock();
         let (st, traces) = ss_rap_p3::state::tests_case(600, 8);
         let p = Params { log_rows: 8, log_blowup: 1, queries: 20, budget: 3, query_pow: 0 };
-        let proof = record::prove_one(&st, &traces, &p);
-        let (ok, ops) = record::verify_one(&st, &proof, &p);
+        let blobs = ss_rap_p3::state::tests_blobs(&st);
+        let claim = blobs.claim();
+        let proof = record::prove_one(&st, &traces, &blobs, &p);
+        let (ok, ops) = record::verify_one(&st, &proof, &claim, &p);
         assert!(ok);
         let s: Vec<u32> = ops.iter().filter_map(|o| if let Op::Sample(v) = o { Some(*v) } else { None }).collect();
         let e = |k: usize| EF::from_basis_coefficients_slice(&s[k..k + 4].iter().map(|&v| F::from_u32(v)).collect::<Vec<_>>()).unwrap();
         let (la, lb, alpha, zeta) = (e(0), e(4), e(8), e(12));
 
         let (cfg, _) = record::config(p.log_blowup, p.queries, p.query_pow);
-        let airs = all_airs::<F>(&st);
+        let airs = all_airs::<F>(&st, p.log_rows, claim.slots());
+        let pvs = ss_rap_p3::state::all_public_values::<F>(&st, &airs, &claim);
         let degs: Vec<usize> = proof.degree_bits.clone();
         let pd = ProverData::<record::Config>::from_airs_and_degrees_with_lookup_budgets(&cfg, &airs, &degs, &vec![p.budget; airs.len()], p.log_blowup).unwrap();
         let lookups = &pd.common.lookups;
@@ -409,6 +576,7 @@ mod tests {
                 challenges,
                 perm_values: proof.lookup_terminals[i].iter().map(|t| t.0).collect(),
                 periodic,
+                public: pvs[i].iter().map(|&v| EF::from(v)).collect(),
                 is_first_row: first,
                 is_last_row: last,
                 is_transition: trans,

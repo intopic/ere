@@ -40,7 +40,7 @@ E njëjta punë: N permutacione Poseidon2-KoalaBear (gjerësi 16), një për rre
 | Arbitrum | ~250 ms | 7 ditë për tërheqje (optimistik) |
 | zkSync Era, Scroll, Linea | < 1–2 s | minuta deri në orë (batch + provë + vonesë ekzekutimi), sipas L2BEAT |
 | SP1 Hypercube (Succinct) | — | provon blloqe Ethereum në kohë reale (< 12 s) me ~16 GPU |
-| **Ne sot** | 0.5 µs në proces | ~2.5 min (projeksion, CPU) |
+| **Ne sot** | p50 ~150 µs në proces (verifikimi ECDSA) | ~2.5 min (projeksion, CPU) |
 | **Ne, objektivi** | < 200 ms | 12–45 s |
 
 Burime: L2BEAT (l2beat.com, "Tracking time to finality of L2 transactions"), docs.base.org (Flashblocks),

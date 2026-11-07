@@ -3,6 +3,19 @@ name: Sepolia end-to-end
 # Needs the secrets SEPOLIA_RPC_URL and SEPOLIA_PRIVATE_KEY (a TEST key with testnet ETH).
 on:
   workflow_dispatch:
+    inputs:
+      txs:
+        description: L2 transactions per batch (at most 1076, one blob)
+        default: "20"
+      accounts:
+        description: L2 accounts
+        default: "8"
+      log_rows:
+        description: Plonky3 rows per lane (log2), enough for txs
+        default: "5"
+      batches:
+        description: number of batches settled one after another
+        default: "2"
 
 permissions:
   contents: read
@@ -20,6 +33,10 @@ jobs:
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
           SEPOLIA_PRIVATE_KEY: ${{ secrets.SEPOLIA_PRIVATE_KEY }}
+          E2E_TXS: ${{ inputs.txs }}
+          E2E_ACCOUNTS: ${{ inputs.accounts }}
+          E2E_LOG_ROWS: ${{ inputs.log_rows }}
+          E2E_BATCHES: ${{ inputs.batches }}
         run: |
           set -o pipefail
           script/sepolia_e2e.sh 2>&1 | tee sepolia.txt

@@ -44,7 +44,7 @@ Transaksionet ─► Sequencer (soft-finality < 200 ms) ─► Batch 1000 tx ─
 | 7 | GPU (CUDA) | ⚠️ kernel i palidhur | Host launcher, NTT batch, V-UMT Blake3 në GPU, benchmark RTX 4090 |
 | 8 | Wrapper Groth16 | ⚠️ `settlement/groth16.rs`: Groth16 real + verifikues Solidity nga VK; qarku ende DEV. Rekursioni në punë: gadget-e BN254 dhe hash Poseidon gati (plani: `archive/recursion/REKURSIONI.md`) | Qarku që verifikon STARK-un (verifikues STARK si qark BN254, ose STARK-u në zkVM me Groth16), ceremoni trusted setup |
 | 9 | Kontrata L1 | ✅ verifikues i ndarë (VK reale nga setup), 13 teste Foundry me provë nga Rust, gas i matur ~280k/tx settlement | Deploy në Sepolia (kërkon çelës me ETH testnet) |
-| 10 | Sequencer / aggregator | ✅ `settlement/sequencer.rs` + `pipeline.rs`: konfirmim i butë (p99 ~3 µs në proces), batch, rrënjë të zinxhiruara; pipeline provon tranzicionin e gjendjes dhe refuzon rrënjë që nuk përputhen me provën | Shërbim rrjeti (RPC), nënshkrim i konfirmimeve, sparse Merkle tree |
+| 10 | Sequencer / aggregator | ✅ `settlement/sequencer.rs` + `pipeline.rs`: konfirmim i butë (p99 ~210 µs në proces, me verifikimin ECDSA), batch, rrënjë të zinxhiruara; pipeline provon tranzicionin e gjendjes dhe refuzon rrënjë që nuk përputhen me provën | Shërbim rrjeti (RPC), nënshkrim i konfirmimeve, sparse Merkle tree |
 | 11 | Moduli i pagesës | ✅ `settlement/fees.rs`: $0.006/$0.025, dysheme kosto × (1 + 20%), gas/blob/prover/agregim | Paymaster me stablecoin |
 | 12 | Benchmark dhe CI | ✅ CI jeshil, `bench_pdf_strategy` | Matje end-to-end: koha e provës, gas, finaliteti, $/tx |
 

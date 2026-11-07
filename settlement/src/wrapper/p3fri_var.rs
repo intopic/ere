@@ -330,11 +330,29 @@ pub fn verify_pcs<'s, 'e: 's>(
         }
     }
     let n_pow = ladder_len.values().copied().max().unwrap_or(0);
-    let mut alpha_pow = vec![e4_const([1, 0, 0, 0])];
-    for _ in 1..n_pow {
-        let next = alpha_pow.last().unwrap().mul(&alpha).reduce(cs)?;
-        alpha_pow.push(next);
+    // alpha^(32 a + b) = alpha^(32 a) * alpha^b: 32 + n/32 reduced powers, the others unreduced
+    // products (about 66 bits; every use below multiplies them by a base or opened value and
+    // sums, which the bounds allow)
+    const K: usize = 32;
+    let mut low = vec![e4_const([1, 0, 0, 0])];
+    while low.len() < K.min(n_pow.max(1)) {
+        let next = low.last().unwrap().mul(&alpha).reduce(cs)?;
+        low.push(next);
     }
+    let mut alpha_pow = low.clone();
+    if n_pow > K {
+        let step = low[K - 1].mul(&alpha).reduce(cs)?;
+        let mut high = step.clone();
+        while alpha_pow.len() < n_pow {
+            for b in 0..K.min(n_pow - alpha_pow.len()) {
+                alpha_pow.push(if b == 0 { high.clone() } else { high.mul(&low[b]) });
+            }
+            if alpha_pow.len() < n_pow {
+                high = high.mul(&step).reduce(cs)?;
+            }
+        }
+    }
+    alpha_pow.truncate(n_pow);
     // (log_height, offset, sum_at_z) per (batch, matrix, point), in Plonky3's order
     let mut offsets = std::collections::BTreeMap::<usize, usize>::new();
     let mut reductions = Vec::new();

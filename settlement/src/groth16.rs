@@ -22,6 +22,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_snark::SNARK;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use ark_std::rand::{CryptoRng, RngCore};
 
 /// DEV wrapper circuit: public input x, private witness w, constraint w * 1 = x.
 #[derive(Clone)]
@@ -67,8 +68,13 @@ pub fn p3_dev_setup(shape: &crate::wrapper::p3settle::P3SettleShape) -> (Proving
 /// `p3_dev_setup` and the shape's matrices (kept by the prover: per batch only the witness is
 /// computed).
 pub fn p3_dev_setup_with_matrices(shape: &crate::wrapper::p3settle::P3SettleShape) -> ((ProvingKey<Bn254>, VerifyingKey<Bn254>), ark_relations::r1cs::ConstraintMatrices<Fr>) {
-    let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, true).expect("synthesis");
-    (p3_setup_from_matrices(&m.matrices, &mut ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED)), m.matrices)
+    let m = crate::wrapper::p3settle::synthesize_parallel(shape, None, None, None, None, true).expect("synthesis");
+    (p3_dev_setup_from_matrices(&m.matrices), m.matrices)
+}
+
+/// `p3_dev_setup` from the shape's matrices. NOT SECURE (public seed): tests and CI only.
+pub fn p3_dev_setup_from_matrices(m: &ark_relations::r1cs::ConstraintMatrices<Fr>) -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+    p3_setup_from_matrices(m, &mut ChaCha20Rng::from_seed(P3_DEV_SETUP_SEED))
 }
 
 /// Groth16 setup of a merged R1CS (`wrapper::par::synthesize`).
@@ -77,22 +83,25 @@ pub fn p3_setup_from_matrices<R: ark_std::rand::RngCore + ark_std::rand::CryptoR
 }
 
 /// Groth16 proof of a merged, satisfied R1CS with its full assignment.
-pub fn p3_prove_merged(pk: &ProvingKey<Bn254>, m: &crate::wrapper::par::Merged, seed: u64) -> Proof<Bn254> {
-    p3_prove_with(pk, &m.matrices, &m.assignment, seed)
+pub fn p3_prove_merged<R: RngCore + CryptoRng>(pk: &ProvingKey<Bn254>, m: &crate::wrapper::par::Merged, rng: &mut R) -> Proof<Bn254> {
+    p3_prove_with(pk, &m.matrices, &m.assignment, rng)
 }
 
 /// Groth16 proof from the shape's matrices (computed once) and a batch's full assignment
 /// (`wrapper::p3settle::witness_parallel`).
-pub fn p3_prove_with(pk: &ProvingKey<Bn254>, mx: &ark_relations::r1cs::ConstraintMatrices<Fr>, assignment: &[Fr], seed: u64) -> Proof<Bn254> {
+///
+/// `rng` draws the proof's blinding scalars r and s; they must be fresh and secret (audit
+/// M-03): in production an OS-seeded CSPRNG (`rand_core::OsRng`). A seeded ChaCha gives
+/// reproducible proofs and belongs in fixtures and tests only.
+pub fn p3_prove_with<R: RngCore + CryptoRng>(pk: &ProvingKey<Bn254>, mx: &ark_relations::r1cs::ConstraintMatrices<Fr>, assignment: &[Fr], rng: &mut R) -> Proof<Bn254> {
     use ark_std::UniformRand;
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let (r, s) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+    let (r, s) = (Fr::rand(rng), Fr::rand(rng));
     Groth16::<Bn254>::create_proof_with_reduction_and_matrices(pk, r, s, mx, mx.num_instance_variables, mx.num_constraints, assignment).expect("prove")
 }
 
-pub fn prove(pk: &ProvingKey<Bn254>, public_input: Fr, seed: u64) -> Proof<Bn254> {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    Groth16::<Bn254>::prove(pk, SettlementCircuit { public_input: Some(public_input) }, &mut rng).expect("prove")
+/// DEV-circuit proof; `rng` as in `p3_prove_with`.
+pub fn prove<R: RngCore + CryptoRng>(pk: &ProvingKey<Bn254>, public_input: Fr, rng: &mut R) -> Proof<Bn254> {
+    Groth16::<Bn254>::prove(pk, SettlementCircuit { public_input: Some(public_input) }, rng).expect("prove")
 }
 
 pub fn verify(vk: &VerifyingKey<Bn254>, public_input: Fr, proof: &Proof<Bn254>) -> bool {
@@ -269,7 +278,7 @@ mod tests {
     fn prove_and_verify_roundtrip() {
         let (pk, vk) = dev_setup();
         let x = Fr::from(123456789u64);
-        let proof = prove(&pk, x, 1);
+        let proof = prove(&pk, x, &mut ChaCha20Rng::seed_from_u64(1));
         assert!(verify(&vk, x, &proof));
         assert!(!verify(&vk, x + Fr::from(1u64), &proof), "proof is bound to its public input");
     }
