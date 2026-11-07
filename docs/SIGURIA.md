@@ -52,9 +52,11 @@ vlerësimesh (rrënjët e njësisë në rend bit-reversed). Lidhja që ndërtojm
    sponge Poseidon2-BabyBear; digest-i `D` del si vlerë publike (O(1) për Groth16).
 3. **Pika:** `z = H(D, versioned hashes) mod r_bls`, e llogaritur në qarkun Groth16. Prover-i nuk
    mund ta zgjedhë `z` para se të fiksojë elementet.
-4. **Vlerësimi brenda STARK-ut:** me AIR-in MULMOD (moduli BLS12-381), për çdo element
+4. **Vlerësimi brenda STARK-ut** (`p3/src/blob_eval.rs`, gati si AIR më vete): me AIR-in MULMOD (moduli BLS12-381), për çdo element
    `u_i·(z − w_i) ≡ e_i·w_i`, shuma `Σ u_i`, pastaj `y·4096 = Σ u_i·(z^4096 − 1)`. Rreth 2 rreshta
-   MULMOD për element, pra rreth 50k rreshta për 6 blob-e.
+   MULMOD për element, pra rreth 50k rreshta për 6 blob-e. Në fakt: një AIR me 600 kolona dhe 4 096
+   rreshta për blob; `S = Σ e_i·w_i/(z − w_i)` del si vlerë publike dhe `p(z) = S·(z^4096 − 1)/4096`
+   llogaritet jashtë STARK-ut. Testi kundrejt c-kzg kalon; një blob provohet në ~1 s në CPU.
 5. **Lidhja me ekzekutimin:** një bus nga rreshtat e transaksioneve te bajtet e blob-it (pozicioni,
    vlera), sipas formatit kanonik `Tx::encode`.
 6. **L1:** `z` dhe `y_j` hyjnë në hash-in e header-it; kontrata thërret 0x0a për çdo blob
@@ -66,7 +68,7 @@ Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet 
 
 | Gjetja | Gjendja |
 |---|---|
-| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (pjesa 1/6 gati) |
+| H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | në punë (pjesët 1 dhe 4 gati) |
 | C-02 ECDSA brenda provës | hapur (hapi 4) |
 | C-01 Ceremonia e çelësave | e shtyrë me vendim: bëhet pasi qarku të ngrihet |
 | M-01, M-02, M-05, M-06, I-01 | jo në rrugën e settlement-it; të paprekura |

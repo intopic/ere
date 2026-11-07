@@ -3,6 +3,7 @@
 
 pub mod bn254;
 pub mod config;
+pub mod blob_eval;
 pub mod mulmod;
 pub mod state;
 pub mod record;
