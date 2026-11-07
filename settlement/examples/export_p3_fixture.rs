@@ -36,9 +36,9 @@ fn main() {
     let (st, traces) = ss_rap_p3::state::tests_case(n_tx as u32, log_rows as u32);
     let p = Params { log_rows, log_blowup, queries, budget: 3, query_pow };
 
-    // the batch's blob: its transfers, one per slot (made-up signatures: audit C-02 is open)
-    let blob = p3settle::tests_blob_bytes(&st).remove(0);
-    let (blobs, blobs_hash) = p3settle::blob_input(std::slice::from_ref(&blob), 1).unwrap();
+    // the batch's blobs: its transfers, one per slot (made-up signatures: audit C-02 is open)
+    let blob_bytes = p3settle::tests_blob_bytes(&st);
+    let (blobs, blobs_hash) = p3settle::blob_input(&blob_bytes, blob_bytes.len().next_power_of_two()).unwrap();
 
     let t0 = Instant::now();
     let (proof, ops, claim) = p3settle::prove(&st, &traces, &blobs, &p);
@@ -46,7 +46,7 @@ fn main() {
     let shape = P3SettleShape::new(&st, &p, &proof, &ops);
     let w = p3settle::witness(&shape, &proof, &ops);
     let h = p3settle::header(&st, &w, &claim, blobs_hash, 1, &Domain::DEV);
-    let kzg = ss_rap_settlement::blob_eval::point_evaluation_input(&blob, &h.blob_point).unwrap()[96..].to_vec();
+    let kzg: Vec<u8> = blob_bytes.iter().flat_map(|b| ss_rap_settlement::blob_eval::point_evaluation_input(b, &h.blob_point).unwrap()[96..].to_vec()).collect();
 
     let print_head = || {
         println!("SS-RAP v2 P4b Plonky3 settlement circuit: {n_tx} transfers, 5 lanes x 2^{log_rows} rows, blowup {} x {queries} queries + {query_pow} bits grinding", 1 << log_blowup);

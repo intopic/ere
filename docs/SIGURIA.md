@@ -87,11 +87,28 @@ Gjenerimi i fixture-it (setup + provë Groth16) arrin ~14 GB kujtesë; prova vet
 
 Dy blob-e të ndryshme përputhen në një `z` të rastësishme me probabilitet ≤ 4096/r_bls ≈ 2^-243.
 
+## Matja me profilin e prodhimit (hapi 5)
+
+`cargo run --release -p ss_rap_settlement --example export_p3_fixture -- N LOG_ROWS 3 28 16` me
+`P3_COUNT_ONLY=1` (log_blowup 3, 28 queries, 16 bit grinding = 100 bit të hamendësuar), 4 bërthama CPU:
+
+| Batch | Rreshta për korsi | Blob-e | Prova Plonky3 | Kufizime Groth16 |
+|---|---|---|---|---|
+| 40 tx | 2^5 | 1 | 27 s | 9,01M |
+| 1 000 tx | 2^8 | 1 | 28 s | 9,02M |
+| 5 000 tx | 2^10 | 5 (8 slot-e) | 95 s | 9,33M |
+
+Qarku Groth16 mbetet pothuajse i pandryshuar me madhësinë e batch-it (O(1)). Rreth 80% e tij
+është argumenti i hapjes (FRI me 28 queries). Me profilin e CI-së (4 queries) qarku ka 3,2M
+kufizime dhe prova Groth16 merr ~19 s me ~14 GB kujtesë. Për 9M kufizime, kujtesa dhe koha
+shkojnë rreth 2,8 herë më lart (~40 GB, ~1 min në 4 bërthama, para GPU-së), sipas shkallëzimit
+të matur. Prova Plonky3 rritet me numrin e blob-eve (4 096 rreshta për blob) dhe të transaksioneve.
+
 ## Ende hapur
 
 | Gjetja | Gjendja |
 |---|---|
 | H-01 Lidhja e përmbajtjes së blob-it me transaksionet e ekzekutuara | e mbyllur në kod (1–6); nënshkrimet mbeten te C-02 |
-| C-02 ECDSA brenda provës | hapur (hapi 4) |
+| C-02 ECDSA brenda provës | hapur: shtyrë me vendim (7.11.2026); rrezik që duhet mbyllur para mainnet-it |
 | C-01 Ceremonia e çelësave | e shtyrë me vendim: bëhet pasi qarku të ngrihet |
 | M-01, M-02, M-05, M-06, I-01 | jo në rrugën e settlement-it; të paprekura |
