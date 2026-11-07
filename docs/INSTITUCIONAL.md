@@ -63,7 +63,7 @@ një kanal për GPU).
 
 | Matja | Rezultati |
 |---|---|
-| Konfirmim i butë në sequencer | p50 ~0.5 µs, p99 ~2 µs në proces (objektivi < 200 ms; rrjeti shton vonesën e vet) |
+| Konfirmim i butë në sequencer | p50 ~150 µs, p99 ~210 µs në proces, kryesisht verifikimi i nënshkrimit ECDSA (objektivi < 200 ms; rrjeti shton vonesën e vet) |
 | STARK i gjendjes prove / verify (CPU) | ~80 ms / ~13 ms (provon old_state_root → new_state_root) |
 | Groth16 prove / verify | ~2 ms / ~3 ms |
 | Gas në L1 për `verifyAndSettleBatchV2` | 269k brenda thirrjes (batch i parë) + 21k bazë + calldata, pra ~280k. PDF-ja synon ~240k. Agregimi i disa batch-eve e ul koston për batch. |
