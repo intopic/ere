@@ -40,7 +40,7 @@ dhe nënshkrimet e transaksioneve mbulojnë `TX_DOMAIN || chain id || adresa e k
 - `P3Prover::new` nuk krijon çelësa; `P3Prover::dev_keys()` është setup-i me seed publik (vetëm teste/testnet).
 - Rastësia e Groth16 vjen nga thirrësi (`RngCore + CryptoRng`): `OsRng` në prodhim, ChaCha me seed vetëm për fixture.
 
-## H-01: dizajni i lidhjes së blob-it (në punë)
+## H-01: dizajni i lidhjes së blob-it (gati në kod)
 
 Përmbajtja e blob-it arrin në EVM vetëm përmes precompile-it 0x0a: për një pikë `z` ai vërteton
 `p_blob(z) = y`, ku `p_blob` është polinomi mbi fushën e BLS12-381 që blob-i mban në formë
